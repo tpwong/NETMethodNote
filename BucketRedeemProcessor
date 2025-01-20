@@ -1,0 +1,198 @@
+CREATE TABLE bucket_redeem_transactions (
+    id character varying(50) NOT NULL,
+    acct varchar(50) NOT NULL,
+    bucket_type varchar(50) NOT NULL,
+    gaming_dt date NOT NULL,
+    redeem_amount numeric(14, 4) NOT NULL,
+	source varchar(50) NOT NULL, -- POE, etc.
+    detail jsonb NOT NULL, -- key: bucket_acct.earning_bucket_main_id, value: numeric(14, 4)
+    last_modified_date timestamp NOT NULL DEFAULT now(),
+    is_void bool NOT NULL DEFAULT false,
+    CONSTRAINT pk_bucket_earned_transactions PRIMARY KEY (tran_id, category, bucket_type, earning_bucket_main_id)
+);
+
+CREATE TABLE bucket_total_balances (
+    acct varchar(50) NOT NULL,
+	-- '{"point": 0, "dollar": 0, "comp": 0, "mcomp": 0}'
+	-- point, dollar, comp, mcomp是屬於bucket_type的一種
+    total_balances jsonb NOT NULL,
+    last_modified_date timestamp NOT NULL DEFAULT now(),
+    CONSTRAINT pk_bucket_total_balances PRIMARY KEY (acct)
+);
+
+
+-- 新table
+CREATE TABLE bucket_acct (
+    acct varchar(50) NOT NULL,
+	bucket_type varchar(50) NOT NULL,
+    earning_bucket_main_id varchar(50) NOT NULL, -- main_id column for earning_bucket table;
+	earned numeric(14, 4) NOT NULL,
+    remaining numeric(14, 4) NOT NULL,
+    last_modified_date timestamp NOT NULL DEFAULT now(),
+    is_used bool GENERATED ALWAYS AS (remaining <= 0) STORED,
+    CONSTRAINT pk_bucket_acct PRIMARY KEY (acct, bucket_type, earning_bucket_main_id)
+);
+
+CREATE TABLE earning_bucket (
+    id character varying(50) NOT NULL,
+    main_id character varying(50) NOT NULL,
+    is_latest boolean NOT NULL DEFAULT FALSE,
+    is_actived boolean NOT NULL DEFAULT FALSE,
+    earning_name character varying(200) NOT NULL,
+    category varchar(50) NOT NULL,
+    bucket_expiry timestamp without time zone,
+    is_deleted boolean NOT NULL DEFAULT FALSE,
+    created_by character varying(200) NOT NULL,
+    created_date timestamp without time zone NOT NULL,
+    last_modified_by character varying(200) NOT NULL,
+    last_modified_date timestamp without time zone NOT NULL,
+    CONSTRAINT pk_earning_bucket PRIMARY KEY (id)
+);
+
+傳入參數是acct, bucket_type, gaming_dt, redeem_amount, source
+0. 其實bucket_acct表已經包含bucket_expiry的資訊, 因為可以用earning_bucket_main_id = main_id做關聯
+1. bucket_redeem_transactions是流水, 每次都是insert records
+2. 收到acct, bucket_type, gaming_dt, redeem_amount參數後, 在bucket_acct表中, 按bucket_expiry排序, bucket_expiry愈小/愈早的records優先扣, 找出目前的remaining, 再用redeem_amount逐個逐個扣, 當然, 如果客人是不夠錢的, 就需要rollback + throw exception. 當然, 扣bucket_acct的同時, 記得要update bucket_acct表中的remaining
+3. bucket_total_balances表, 根據acct, 找出bucket_type, 扣掉現有的value, 這張表是記錄redeem後, 客人還剩多少錢可以用
+
+
+using Npgsql;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Threading.Tasks;
+using Newtonsoft.Json;
+
+public static class BucketRedeemProcessor
+{
+    public static async Task ProcessBucketRedeemTransactionAsync(string connectionString, string acct, string bucket_type, DateTime gaming_dt, decimal redeem_amount, string source)
+    {
+        using (var conn = new NpgsqlConnection(connectionString))
+        {
+            await conn.OpenAsync();
+
+            // Start a transaction with Read Committed isolation level
+            using (var tran = await conn.BeginTransactionAsync(IsolationLevel.ReadCommitted))
+            {
+                try
+                {
+                    // Step 1: Retrieve and lock bucket_acct records for the account and bucket_type, ordered by bucket_expiry
+                    string selectBucketAcctsSql = @"
+SELECT ba.earning_bucket_main_id,
+       ba.remaining,
+       eb.bucket_expiry
+FROM bucket_acct ba
+JOIN earning_bucket eb
+    ON ba.earning_bucket_main_id = eb.main_id
+WHERE ba.acct = @acct
+  AND ba.bucket_type = @bucket_type
+  AND ba.remaining > 0
+ORDER BY eb.bucket_expiry ASC NULLS LAST
+FOR UPDATE OF ba
+";
+
+                    var cmdSelectBucketAccts = new NpgsqlCommand(selectBucketAcctsSql, conn, tran);
+                    cmdSelectBucketAccts.Parameters.AddWithValue("acct", acct);
+                    cmdSelectBucketAccts.Parameters.AddWithValue("bucket_type", bucket_type);
+
+                    var bucketAcctList = new List<(string earning_bucket_main_id, decimal remaining)>();
+                    decimal totalRemaining = 0;
+
+                    using (var reader = await cmdSelectBucketAccts.ExecuteReaderAsync())
+                    {
+                        while (await reader.ReadAsync())
+                        {
+                            var earning_bucket_main_id = reader.GetString(0);
+                            var remaining = reader.GetDecimal(1);
+                            // bucket_expiry is not used in the code but can be read if needed
+                            // var bucket_expiry = reader.IsDBNull(2) ? (DateTime?)null : reader.GetDateTime(2);
+
+                            bucketAcctList.Add((earning_bucket_main_id, remaining));
+                            totalRemaining += remaining;
+                        }
+                    }
+
+                    // Step 2: Check if total remaining is enough
+                    if (totalRemaining < redeem_amount)
+                    {
+                        throw new InvalidOperationException("Insufficient balance to redeem the requested amount.");
+                    }
+
+                    // Step 3: Deduct redeem_amount from bucket_acct records
+                    decimal amountToDeduct = redeem_amount;
+                    var detailDict = new Dictionary<string, decimal>(); // For recording detail of deductions
+
+                    foreach (var bucketAcct in bucketAcctList)
+                    {
+                        if (amountToDeduct <= 0)
+                            break;
+
+                        var deductAmount = Math.Min(bucketAcct.remaining, amountToDeduct);
+                        amountToDeduct -= deductAmount;
+
+                        // Update bucket_acct remaining
+                        string updateBucketAcctSql = @"
+UPDATE bucket_acct
+SET remaining = remaining - @deductAmount,
+    last_modified_date = NOW()
+WHERE acct = @acct AND bucket_type = @bucket_type AND earning_bucket_main_id = @earning_bucket_main_id
+";
+                        var cmdUpdateBucketAcct = new NpgsqlCommand(updateBucketAcctSql, conn, tran);
+                        cmdUpdateBucketAcct.Parameters.AddWithValue("acct", acct);
+                        cmdUpdateBucketAcct.Parameters.AddWithValue("bucket_type", bucket_type);
+                        cmdUpdateBucketAcct.Parameters.AddWithValue("earning_bucket_main_id", bucketAcct.earning_bucket_main_id);
+                        cmdUpdateBucketAcct.Parameters.AddWithValue("deductAmount", deductAmount);
+
+                        await cmdUpdateBucketAcct.ExecuteNonQueryAsync();
+
+                        // Record the detail
+                        detailDict[bucketAcct.earning_bucket_main_id] = deductAmount;
+                    }
+
+                    // Step 4: Update bucket_total_balances
+                    string updateBucketTotalBalancesSql = @"
+INSERT INTO bucket_total_balances (acct, total_balances, last_modified_date)
+VALUES (@acct, jsonb_build_object(@bucket_type, 0)::jsonb - jsonb_build_object(@bucket_type, @redeem_amount)::jsonb, NOW())
+ON CONFLICT (acct)
+DO UPDATE SET
+    total_balances = bucket_total_balances.total_balances - jsonb_build_object(@bucket_type, @redeem_amount)::jsonb,
+    last_modified_date = NOW()
+";
+                    var cmdUpdateBucketTotalBalances = new NpgsqlCommand(updateBucketTotalBalancesSql, conn, tran);
+                    cmdUpdateBucketTotalBalances.Parameters.AddWithValue("acct", acct);
+                    cmdUpdateBucketTotalBalances.Parameters.AddWithValue("bucket_type", bucket_type);
+                    cmdUpdateBucketTotalBalances.Parameters.AddWithValue("redeem_amount", redeem_amount);
+
+                    await cmdUpdateBucketTotalBalances.ExecuteNonQueryAsync();
+
+                    // Step 5: Insert into bucket_redeem_transactions
+                    string insertBucketRedeemTransactionsSql = @"
+INSERT INTO bucket_redeem_transactions (id, acct, bucket_type, gaming_dt, redeem_amount, source, detail, last_modified_date, is_void)
+VALUES (@id, @acct, @bucket_type, @gaming_dt, @redeem_amount, @source, @detail::jsonb, NOW(), FALSE)
+";
+                    var cmdInsertBucketRedeemTransactions = new NpgsqlCommand(insertBucketRedeemTransactionsSql, conn, tran);
+                    cmdInsertBucketRedeemTransactions.Parameters.AddWithValue("id", Guid.NewGuid().ToString());
+                    cmdInsertBucketRedeemTransactions.Parameters.AddWithValue("acct", acct);
+                    cmdInsertBucketRedeemTransactions.Parameters.AddWithValue("bucket_type", bucket_type);
+                    cmdInsertBucketRedeemTransactions.Parameters.AddWithValue("gaming_dt", gaming_dt);
+                    cmdInsertBucketRedeemTransactions.Parameters.AddWithValue("redeem_amount", redeem_amount);
+                    cmdInsertBucketRedeemTransactions.Parameters.AddWithValue("source", source);
+                    cmdInsertBucketRedeemTransactions.Parameters.AddWithValue("detail", JsonConvert.SerializeObject(detailDict));
+
+                    await cmdInsertBucketRedeemTransactions.ExecuteNonQueryAsync();
+
+                    // Commit transaction
+                    await tran.CommitAsync();
+                }
+                catch (Exception)
+                {
+                    // Rollback transaction on error
+                    await tran.RollbackAsync();
+                    throw;
+                }
+            }
+        }
+    }
+}
+
+以上步驟有什麼地方可以優化?
