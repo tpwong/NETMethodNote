@@ -22,7 +22,7 @@ BEGIN
         quarter_name, quarter_start, quarter_end
     );
     
-    -- 創建該季度的所有哈希分區
+    -- 創建該季度的所有哈希分區並添加索引
     FOR hash_id IN 0..15 LOOP
         partition_name := 'transactions_' || quarter_name || '_hash' || hash_id;
         
@@ -31,6 +31,9 @@ BEGIN
             'FOR VALUES WITH (MODULUS 16, REMAINDER %s)',
             partition_name, quarter_name, hash_id
         );
+        
+        -- 創建索引
+        PERFORM create_partition_indexes(partition_name);
     END LOOP;
 END;
 $$ LANGUAGE plpgsql;
@@ -42,23 +45,31 @@ CREATE OR REPLACE FUNCTION purge_old_partitions()
 RETURNS void AS $$
 DECLARE
     purge_before DATE := CURRENT_DATE - interval '7 years';
-    purge_quarter TEXT;
-    partition_exists BOOLEAN;
+    quarters_to_check RECORD;
+    partition_earliest_date DATE;
+    partition_name TEXT;
 BEGIN
-    purge_quarter := to_char(date_trunc('quarter', purge_before), 'YYYY') || 'Q' || 
-                     to_char(date_part('quarter', date_trunc('quarter', purge_before)), '9');
-    
-    -- 檢查分區是否存在
-    SELECT EXISTS (
-        SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace 
-        WHERE c.relname = 'transactions_' || purge_quarter AND n.nspname = 'public'
-    ) INTO partition_exists;
-    
-    -- 如果存在就刪除
-    IF partition_exists THEN
-        EXECUTE format('DROP TABLE transactions_%s CASCADE', purge_quarter);
-        RAISE NOTICE 'Dropped partition for quarter: %', purge_quarter;
-    END IF;
+    -- 查找所有可能需要清理的季度分區
+    FOR quarters_to_check IN 
+        SELECT table_name 
+        FROM information_schema.tables 
+        WHERE table_name LIKE 'transactions_20%Q_'
+        ORDER BY table_name
+    LOOP
+        partition_name := quarters_to_check.table_name;
+        
+        -- 獲取分區中的最新日期
+        EXECUTE format(
+            'SELECT COALESCE(MAX(last_modified_date), ''9999-12-31''::date) FROM %I',
+            partition_name
+        ) INTO partition_earliest_date;
+        
+        -- 如果整個分區都是舊數據，則刪除
+        IF partition_earliest_date < purge_before THEN
+            EXECUTE format('DROP TABLE %I CASCADE', partition_name);
+            RAISE NOTICE 'Dropped partition: %', partition_name;
+        END IF;
+    END LOOP;
 END;
 $$ LANGUAGE plpgsql;
 
