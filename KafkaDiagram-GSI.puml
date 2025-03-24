@@ -1,0 +1,76 @@
+@startuml Kafka_Topics_Flow
+
+' 自定義圖形樣式
+skinparam rectangle {
+  BackgroundColor<<Service>> MediumPurple
+  BorderColor<<Service>> DarkPurple
+  FontColor<<Service>> White
+}
+
+skinparam database {
+  BackgroundColor<<KafkaTopic>> LightYellow
+  BorderColor<<KafkaTopic>> Orange
+  FontColor<<KafkaTopic>> Black
+}
+
+' 服務定義（紫色正方形）
+rectangle "GIG-rating\n(C# Service)" as GIGRating <<Service>>
+rectangle "StreamToProcessor\n(C# Service)" as StreamToProcessor <<Service>>
+rectangle "StreamToCrm\n(C# Service)" as StreamToCrm <<Service>>
+rectangle "StreamToCmp\n(C# Service)" as StreamToCmp <<Service>>
+
+' Kafka Topics 定義（ middleware 框）
+database "GSI-Rating\n(12 Partitions)" as GSIRating <<KafkaTopic>>
+database "GSI-CRM\n(12 Partitions)" as GSICRM <<KafkaTopic>>
+database "GIG-CMP\n(12 Partitions)" as GIGCMP <<KafkaTopic>>
+database "BetByBetBuffer\n(12 Partitions)" as BetByBetBuffer <<KafkaTopic>>
+
+' 關係定義
+GIGRating --> GSIRating : produces\n(key: Acct-Casino-RatingId)
+GSIRating --> StreamToProcessor : consumes
+
+StreamToProcessor --> GSICRM : produces\n(key: Acct-Casino-RatingId)
+StreamToProcessor --> GIGCMP : produces\n(key: Acct-Casino-RatingId)
+
+GSICRM --> StreamToCrm : consumes
+GIGCMP --> StreamToCmp : consumes
+
+StreamToCmp --> GSICRM : produces\n(key: Acct-Casino-RatingId)
+StreamToCrm --> BetByBetBuffer : produces\n(key: Acct-Casino-RatingId)
+
+' 詳細信息備註
+note bottom of GSIRating
+  **Topic**: GSI-Rating
+  **Partitions**: 12
+  **Partition Key**: Acct-Casino-RatingId
+  **Producer**: GIG-rating (C#)
+  **Consumer**: StreamToProcessor (C#)
+endnote
+
+note bottom of GSICRM
+  **Topic**: GSI-CRM
+  **Partitions**: 12
+  **Partition Key**: Acct-Casino-RatingId
+  **Producers**: 
+    - StreamToProcessor (C#)
+    - StreamToCmp (C#)
+  **Consumer**: StreamToCrm (C#)
+endnote
+
+note bottom of GIGCMP
+  **Topic**: GIG-CMP
+  **Partitions**: 12
+  **Partition Key**: Acct-Casino-RatingId
+  **Producer**: StreamToProcessor (C#)
+  **Consumer**: StreamToCmp (C#)
+endnote
+
+note bottom of BetByBetBuffer
+  **Topic**: BetByBetBuffer
+  **Partitions**: 12
+  **Partition Key**: Acct-Casino-RatingId
+  **Producer**: StreamToCrm (C#)
+  **Consumer**: (Not specified)
+endnote
+
+@enduml
