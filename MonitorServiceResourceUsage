@@ -1,101 +1,44 @@
+下面我將代碼重構為多個類文件，這樣組織更清晰，更容易維護。我會為您創建5個主要的類文件：
+
+### 1. Program.cs (主程序入口)
+
+```csharp
 using System;
-using System.Diagnostics;
-using System.Linq;
 using System.Threading;
-using System.Collections.Generic;
-using System.IO;
-using System.Configuration;
+using System.Threading.Tasks;
 using System.Text;
-using System.Reflection;
 
 namespace ProcessMonitor
 {
     class Program
     {
-        // Configuration settings
-        private static string _logFolderPath;
-        private static bool _outputToConsole;
-        private static bool _outputToFile;
-        private static int _monitorIntervalSeconds;
-        private static int _processCount;
+        private static CancellationTokenSource _cancellationTokenSource;
 
-        static void Main(string[] args)
+        static async Task Main(string[] args)
         {
             try
             {
                 // Initialize application configuration
-                InitializeConfig();
+                ConfigurationManager.Initialize();
+                
+                // Create cancellation token source for graceful shutdown
+                _cancellationTokenSource = new CancellationTokenSource();
+
+                // Handle Ctrl+C to gracefully exit
+                Console.CancelKeyPress += (sender, e) => {
+                    e.Cancel = true;
+                    _cancellationTokenSource.Cancel();
+                    Console.WriteLine("Shutting down...");
+                };
                 
                 // Display startup message
-                Console.WriteLine("Process Resource Monitor Started...");
-                Console.WriteLine($"Time: {DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")}");
-                Console.WriteLine($"Monitoring top {_processCount} processes every {_monitorIntervalSeconds} seconds");
-                Console.WriteLine($"Output to console: {_outputToConsole}");
-                Console.WriteLine($"Output to file: {_outputToFile}");
-                if (_outputToFile)
-                    Console.WriteLine($"Log folder: {_logFolderPath}");
-                Console.WriteLine("Note: Non-administrator privileges may limit access to system processes\n");
+                DisplayStartupInfo();
                 
                 // Main monitoring loop
-                while (true)
-                {
-                    // Get current timestamp for this monitoring cycle
-                    DateTime currentTime = DateTime.Now;
-                    string timeStamp = currentTime.ToString("yyyy-MM-dd HH:mm:ss");
-                    
-                    // Generate report heading
-                    StringBuilder report = new StringBuilder();
-                    report.AppendLine($"===== Process Resource Monitor Report =====");
-                    report.AppendLine($"Time: {timeStamp}");
-                    report.AppendLine();
-                    
-                    try
-                    {
-                        // Collect all process resource information
-                        var processResources = CollectProcessResourceInfo();
-                        
-                        // Sort processes by CPU usage and take top N
-                        var topProcesses = processResources
-                            .OrderByDescending(p => p.CpuUsage)
-                            .Take(_processCount)
-                            .ToList();
-                        
-                        // Add header to report
-                        report.AppendLine($"Top {_processCount} processes by CPU usage:");
-                        report.AppendLine($"{"Process Name".PadRight(30)}{"PID".PadRight(10)}{"CPU (%)".PadRight(10)}{"Memory (MB)".PadRight(15)}{"Start Time".PadRight(20)}");
-                        report.AppendLine(new string('-', 85));
-                        
-                        // Add each process to report
-                        foreach (var proc in topProcesses)
-                        {
-                            report.AppendLine($"{proc.ProcessName.PadRight(30)}" +
-                                             $"{proc.ProcessId.ToString().PadRight(10)}" +
-                                             $"{proc.CpuUsage.ToString("F2").PadRight(10)}" +
-                                             $"{proc.MemoryUsageMB.ToString("F2").PadRight(15)}" +
-                                             $"{proc.StartTime.PadRight(20)}");
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        // Log any errors that occur during the monitoring process
-                        report.AppendLine($"Error collecting process information: {ex.Message}");
-                        report.AppendLine($"Stack trace: {ex.StackTrace}");
-                    }
-                    
-                    report.AppendLine();
-                    report.AppendLine($"Next update will occur at: {DateTime.Now.AddSeconds(_monitorIntervalSeconds).ToString("yyyy-MM-dd HH:mm:ss")}");
-                    report.AppendLine(new string('=', 50));
-                    
-                    // Output the report based on configuration settings
-                    OutputReport(report.ToString(), currentTime);
-                    
-                    // Wait for the next monitoring interval
-                    Thread.Sleep(_monitorIntervalSeconds * 1000);
-                    
-                    // Clear console if configured to output to console
-                    if (_outputToConsole)
-                        Console.Clear();
-                }
+                MonitoringEngine monitor = new MonitoringEngine();
+                await monitor.StartMonitoringAsync(_cancellationTokenSource.Token);
+                
+                Console.WriteLine("Process monitor has been shut down.");
             }
             catch (Exception ex)
             {
@@ -107,41 +50,91 @@ namespace ProcessMonitor
             }
         }
         
+        private static void DisplayStartupInfo()
+        {
+            Console.WriteLine("Process Resource Monitor Started...");
+            Console.WriteLine($"Time: {DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")}");
+            Console.WriteLine($"Monitoring top {ConfigurationManager.ProcessCount} processes every {ConfigurationManager.MonitorIntervalSeconds} seconds");
+            Console.WriteLine($"Output to console: {ConfigurationManager.OutputToConsole}");
+            Console.WriteLine($"Output to file: {ConfigurationManager.OutputToFile}");
+            if (ConfigurationManager.OutputToFile)
+                Console.WriteLine($"Log folder: {ConfigurationManager.LogFolderPath}");
+            Console.WriteLine($"Target service patterns: {string.Join(", ", ConfigurationManager.TargetServicePatterns)}");
+            Console.WriteLine("Note: Non-administrator privileges may limit access to system processes\n");
+        }
+    }
+}
+```
+
+### 2. ConfigurationManager.cs (配置管理)
+
+```csharp
+using System;
+using System.Linq;
+using System.Collections.Generic;
+using System.Configuration;
+using System.IO;
+
+namespace ProcessMonitor
+{
+    /// <summary>
+    /// Manages application configuration settings
+    /// </summary>
+    public static class ConfigurationManager
+    {
+        // Configuration settings
+        public static string LogFolderPath { get; private set; }
+        public static bool OutputToConsole { get; private set; }
+        public static bool OutputToFile { get; private set; }
+        public static int MonitorIntervalSeconds { get; private set; }
+        public static int ProcessCount { get; private set; }
+        public static List<string> TargetServicePatterns { get; private set; }
+
         /// <summary>
-        /// Initialize application configuration settings from app.config
+        /// Initialize configuration settings from app.config
         /// </summary>
-        private static void InitializeConfig()
+        public static void Initialize()
         {
             try
             {
                 // Set default values
-                _logFolderPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
-                _outputToConsole = true;
-                _outputToFile = true;
-                _monitorIntervalSeconds = 60;
-                _processCount = 10;
+                LogFolderPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
+                OutputToConsole = true;
+                OutputToFile = true;
+                MonitorIntervalSeconds = 60;
+                ProcessCount = 10;
+                TargetServicePatterns = new List<string> { "MyService", "WebApi", "Worker" }; // Default patterns for C# services
                 
                 // Try to read values from app.config
-                var appSettings = ConfigurationManager.AppSettings;
+                var appSettings = System.Configuration.ConfigurationManager.AppSettings;
                 
                 if (appSettings["LogFolderPath"] != null)
-                    _logFolderPath = appSettings["LogFolderPath"];
+                    LogFolderPath = appSettings["LogFolderPath"];
                 
                 if (appSettings["OutputToConsole"] != null)
-                    _outputToConsole = Convert.ToBoolean(appSettings["OutputToConsole"]);
+                    OutputToConsole = Convert.ToBoolean(appSettings["OutputToConsole"]);
                 
                 if (appSettings["OutputToFile"] != null)
-                    _outputToFile = Convert.ToBoolean(appSettings["OutputToFile"]);
+                    OutputToFile = Convert.ToBoolean(appSettings["OutputToFile"]);
                 
                 if (appSettings["MonitorIntervalSeconds"] != null)
-                    _monitorIntervalSeconds = Convert.ToInt32(appSettings["MonitorIntervalSeconds"]);
+                    MonitorIntervalSeconds = Convert.ToInt32(appSettings["MonitorIntervalSeconds"]);
                 
                 if (appSettings["ProcessCount"] != null)
-                    _processCount = Convert.ToInt32(appSettings["ProcessCount"]);
+                    ProcessCount = Convert.ToInt32(appSettings["ProcessCount"]);
+                
+                if (appSettings["TargetServicePatterns"] != null)
+                {
+                    TargetServicePatterns = appSettings["TargetServicePatterns"]
+                        .Split(',')
+                        .Select(p => p.Trim())
+                        .Where(p => !string.IsNullOrEmpty(p))
+                        .ToList();
+                }
                 
                 // Ensure log directory exists if we're outputting to file
-                if (_outputToFile && !Directory.Exists(_logFolderPath))
-                    Directory.CreateDirectory(_logFolderPath);
+                if (OutputToFile && !Directory.Exists(LogFolderPath))
+                    Directory.CreateDirectory(LogFolderPath);
             }
             catch (Exception ex)
             {
@@ -149,23 +142,176 @@ namespace ProcessMonitor
                 Console.WriteLine($"Error reading configuration: {ex.Message}. Using default values.");
             }
         }
-        
+    }
+}
+```
+
+### 3. ProcessMonitor.cs (進程監控引擎)
+
+```csharp
+using System;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.Text;
+
+namespace ProcessMonitor
+{
+    /// <summary>
+    /// Main monitoring engine for processes
+    /// </summary>
+    public class MonitoringEngine
+    {
         /// <summary>
-        /// Collect resource usage information for all accessible processes
+        /// Start the monitoring loop
+        /// </summary>
+        public async Task StartMonitoringAsync(CancellationToken cancellationToken)
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                // Get current timestamp for this monitoring cycle
+                DateTime currentTime = DateTime.Now;
+                string timeStamp = currentTime.ToString("yyyy-MM-dd HH:mm:ss");
+                
+                // Generate report heading
+                StringBuilder report = new StringBuilder();
+                report.AppendLine($"===== Process Resource Monitor Report =====");
+                report.AppendLine($"Time: {timeStamp}");
+                report.AppendLine();
+                
+                try
+                {
+                    // Asynchronously collect all process resource information
+                    var processCollector = new ProcessCollector();
+                    var processResources = await processCollector.CollectProcessResourceInfoAsync(cancellationToken);
+                    
+                    // Sort processes by CPU usage and take top N
+                    var topProcesses = processResources
+                        .OrderByDescending(p => p.CpuUsage)
+                        .Take(ConfigurationManager.ProcessCount)
+                        .ToList();
+                    
+                    // Add header to report
+                    report.AppendLine($"Top {ConfigurationManager.ProcessCount} processes by CPU usage:");
+                    report.AppendLine($"{"Process Name".PadRight(30)}{"PID".PadRight(10)}{"CPU (%)".PadRight(10)}{"Memory (MB)".PadRight(15)}{"Start Time".PadRight(20)}{"Is Target Service".PadRight(15)}");
+                    report.AppendLine(new string('-', 100));
+                    
+                    // Add each process to report
+                    foreach (var proc in topProcesses)
+                    {
+                        report.AppendLine($"{proc.ProcessName.PadRight(30)}" +
+                                         $"{proc.ProcessId.ToString().PadRight(10)}" +
+                                         $"{proc.CpuUsage.ToString("F2").PadRight(10)}" +
+                                         $"{proc.MemoryUsageMB.ToString("F2").PadRight(15)}" +
+                                         $"{proc.StartTime.PadRight(20)}" +
+                                         $"{proc.IsTargetService.ToString().PadRight(15)}");
+                    }
+                }
+                catch (TaskCanceledException)
+                {
+                    // Normal cancellation, just exit
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    // Log any errors that occur during the monitoring process
+                    report.AppendLine($"Error collecting process information: {ex.Message}");
+                    report.AppendLine($"Stack trace: {ex.StackTrace}");
+                }
+                
+                report.AppendLine();
+                report.AppendLine($"Next update will occur at: {DateTime.Now.AddSeconds(ConfigurationManager.MonitorIntervalSeconds).ToString("yyyy-MM-dd HH:mm:ss")}");
+                report.AppendLine(new string('=', 100));
+                
+                // Output the report based on configuration settings
+                var reporter = new ReportManager();
+                await reporter.OutputReportAsync(report.ToString(), currentTime, cancellationToken);
+                
+                // Wait for the next monitoring interval
+                try
+                {
+                    await Task.Delay(ConfigurationManager.MonitorIntervalSeconds * 1000, cancellationToken);
+                    
+                    // Clear console if configured to output to console
+                    if (ConfigurationManager.OutputToConsole)
+                        Console.Clear();
+                }
+                catch (TaskCanceledException)
+                {
+                    // Normal cancellation, just exit
+                    break;
+                }
+            }
+        }
+    }
+}
+```
+
+### 4. ProcessCollector.cs (進程收集器)
+
+```csharp
+using System;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.Text.RegularExpressions;
+
+namespace ProcessMonitor
+{
+    /// <summary>
+    /// Responsible for collecting process information
+    /// </summary>
+    public class ProcessCollector
+    {
+        /// <summary>
+        /// Asynchronously collect resource usage information for all accessible processes
         /// </summary>
         /// <returns>List of process resource information</returns>
-        private static List<ProcessResourceInfo> CollectProcessResourceInfo()
+        public async Task<List<ProcessResourceInfo>> CollectProcessResourceInfoAsync(CancellationToken cancellationToken)
         {
             var processResources = new List<ProcessResourceInfo>();
             var processes = Process.GetProcesses();
             
-            // Iterate through all processes
+            // Pre-filter processes to identify target services
+            var targetProcesses = new Dictionary<int, bool>();
             foreach (var process in processes)
             {
                 try
                 {
-                    // Get CPU usage (this requires measuring over a time interval)
-                    var cpuUsage = GetProcessCpuUsage(process);
+                    bool isTarget = IsTargetService(process.ProcessName);
+                    targetProcesses[process.Id] = isTarget;
+                }
+                catch
+                {
+                    // Skip processes that can't be accessed
+                    targetProcesses[process.Id] = false;
+                }
+            }
+            
+            // Create tasks for all processes
+            var tasks = processes.Select(async process => 
+            {
+                try
+                {
+                    // Check if this is a target process
+                    bool isTargetService = targetProcesses.ContainsKey(process.Id) && targetProcesses[process.Id];
+                    
+                    // Get CPU usage (detailed measurement only for target services)
+                    double cpuUsage;
+                    if (isTargetService)
+                    {
+                        // More accurate CPU measurement for target services
+                        cpuUsage = await GetProcessCpuUsageDetailedAsync(process, cancellationToken);
+                    }
+                    else
+                    {
+                        // Quick CPU measurement for non-target processes
+                        cpuUsage = GetProcessCpuUsageQuick(process);
+                    }
                     
                     // Get memory usage in MB
                     var memoryUsageMB = process.WorkingSet64 / 1024.0 / 1024.0;
@@ -181,37 +327,87 @@ namespace ProcessMonitor
                         // Some processes may not allow access to their start time
                     }
                     
-                    // Add process information to the list
-                    processResources.Add(new ProcessResourceInfo
+                    // Return process information
+                    return new ProcessResourceInfo
                     {
                         ProcessName = process.ProcessName,
                         ProcessId = process.Id,
                         CpuUsage = cpuUsage,
                         MemoryUsageMB = memoryUsageMB,
-                        StartTime = startTime
-                    });
+                        StartTime = startTime,
+                        IsTargetService = isTargetService
+                    };
                 }
                 catch (Exception)
                 {
                     // Skip processes that can't be accessed due to permissions
-                    continue;
+                    return null;
                 }
                 finally
                 {
                     // Dispose process object to free resources
-                    process.Dispose();
+                    try { process.Dispose(); } catch { }
                 }
-            }
+            }).ToList();
             
-            return processResources;
+            // Wait for all tasks to complete
+            var results = await Task.WhenAll(tasks);
+            
+            // Filter out null results and return
+            return results.Where(p => p != null).ToList();
         }
         
         /// <summary>
-        /// Calculate CPU usage percentage for a specific process
+        /// Check if the process is one of our target services based on name patterns
         /// </summary>
-        /// <param name="process">Process to measure</param>
-        /// <returns>CPU usage as a percentage</returns>
-        private static double GetProcessCpuUsage(Process process)
+        private bool IsTargetService(string processName)
+        {
+            // Check if the process name matches any of our target patterns
+            return ConfigurationManager.TargetServicePatterns.Any(pattern => 
+                Regex.IsMatch(processName, pattern, RegexOptions.IgnoreCase));
+        }
+        
+        /// <summary>
+        /// Get a quick estimate of CPU usage for non-target processes
+        /// </summary>
+        private double GetProcessCpuUsageQuick(Process process)
+        {
+            try
+            {
+                // For non-target processes, we just get the current processor time
+                // This is less accurate but much faster for processes we don't care about as much
+                TimeSpan totalProcessorTime = process.TotalProcessorTime;
+                TimeSpan userProcessorTime = process.UserProcessorTime;
+                
+                // Calculate an approximate CPU usage based on how long the process has been running
+                DateTime startTime;
+                try
+                {
+                    startTime = process.StartTime;
+                }
+                catch
+                {
+                    // If we can't get start time, just return 0
+                    return 0;
+                }
+                
+                TimeSpan uptime = DateTime.Now - startTime;
+                if (uptime.TotalMilliseconds <= 0)
+                    return 0;
+                
+                // Rough estimate: CPU time / uptime / processor count
+                return (totalProcessorTime.TotalMilliseconds / uptime.TotalMilliseconds / Environment.ProcessorCount) * 100;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+        
+        /// <summary>
+        /// Get detailed CPU usage for target processes with async/await pattern
+        /// </summary>
+        private async Task<double> GetProcessCpuUsageDetailedAsync(Process process, CancellationToken cancellationToken)
         {
             try
             {
@@ -219,8 +415,8 @@ namespace ProcessMonitor
                 var startTime = DateTime.UtcNow;
                 var startCpuUsage = process.TotalProcessorTime;
                 
-                // Wait briefly to measure CPU usage
-                Thread.Sleep(100); // Shortened for more responsive monitoring
+                // Wait for sampling period
+                await Task.Delay(100, cancellationToken); // 100ms for target services
                 
                 // Get end CPU time and timestamp
                 var endTime = DateTime.UtcNow;
@@ -241,31 +437,50 @@ namespace ProcessMonitor
                 return 0;
             }
         }
-        
+    }
+}
+```
+
+### 5. ReportManager.cs (報告管理)
+
+```csharp
+using System;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace ProcessMonitor
+{
+    /// <summary>
+    /// Handles the generation and output of monitoring reports
+    /// </summary>
+    public class ReportManager
+    {
         /// <summary>
-        /// Output report to console and/or file according to configuration
+        /// Output report to console and/or file according to configuration asynchronously
         /// </summary>
-        /// <param name="report">Report content</param>
-        /// <param name="timestamp">Timestamp for the report</param>
-        private static void OutputReport(string report, DateTime timestamp)
+        public async Task OutputReportAsync(string report, DateTime timestamp, CancellationToken cancellationToken)
         {
             // Output to console if configured
-            if (_outputToConsole)
+            if (ConfigurationManager.OutputToConsole)
             {
                 Console.WriteLine(report);
             }
             
             // Output to file if configured
-            if (_outputToFile)
+            if (ConfigurationManager.OutputToFile)
             {
                 try
                 {
                     // Create log file name based on current date
                     string logFileName = $"ProcessMonitor_{timestamp.ToString("yyyy-MM-dd")}.log";
-                    string logFilePath = Path.Combine(_logFolderPath, logFileName);
+                    string logFilePath = Path.Combine(ConfigurationManager.LogFolderPath, logFileName);
                     
-                    // Append report to log file
-                    File.AppendAllText(logFilePath, report + Environment.NewLine);
+                    // Append report to log file asynchronously
+                    using (StreamWriter writer = new StreamWriter(logFilePath, true))
+                    {
+                        await writer.WriteLineAsync(report);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -275,11 +490,18 @@ namespace ProcessMonitor
             }
         }
     }
-    
+}
+```
+
+### 6. ProcessResourceInfo.cs (數據模型)
+
+```csharp
+namespace ProcessMonitor
+{
     /// <summary>
     /// Class to store process resource usage information
     /// </summary>
-    class ProcessResourceInfo
+    public class ProcessResourceInfo
     {
         /// <summary>Name of the process</summary>
         public string ProcessName { get; set; }
@@ -295,5 +517,58 @@ namespace ProcessMonitor
         
         /// <summary>Process start time</summary>
         public string StartTime { get; set; }
+        
+        /// <summary>Whether this is one of our target services</summary>
+        public bool IsTargetService { get; set; }
     }
 }
+```
+
+### App.config (保持不變)
+
+```xml
+<?xml version="1.0" encoding="utf-8" ?>
+<configuration>
+  <appSettings>
+    <!-- Path where log files will be stored -->
+    <add key="LogFolderPath" value="C:\ProcessMonitorLogs" />
+    
+    <!-- Whether to output reports to console -->
+    <add key="OutputToConsole" value="true" />
+    
+    <!-- Whether to output reports to file -->
+    <add key="OutputToFile" value="true" />
+    
+    <!-- Interval between monitoring cycles in seconds -->
+    <add key="MonitorIntervalSeconds" value="60" />
+    
+    <!-- Number of top processes to show in each report -->
+    <add key="ProcessCount" value="10" />
+    
+    <!-- Comma-separated list of patterns to match for target services -->
+    <add key="TargetServicePatterns" value="MyService,WebApi,Worker,Api,DataProcessor,ServiceHost" />
+  </appSettings>
+</configuration>
+```
+
+### 重構的好處：
+
+1. **關注點分離**：每個類都專注於特定功能
+   - ConfigurationManager：負責配置管理
+   - ProcessCollector：負責收集進程信息
+   - ReportManager：負責報告輸出
+   - MonitoringEngine：協調整個監控流程
+
+2. **模塊化設計**：
+   - 便於測試：可單獨測試每個組件
+   - 便於維護：修改一個組件不會影響其他
+   - 便於擴展：可以輕鬆添加新功能
+
+3. **代碼組織**：
+   - 更清晰的代碼結構
+   - 更好的可讀性
+   - 更易於理解的職責劃分
+
+要使用這些文件，您需要創建一個新的C#控制台項目，然後添加這些類文件。別忘了在項目中引用 `System.Configuration`。
+
+如果您需要對任何特定文件進行進一步的調整或有其他需求，請隨時告訴我！
