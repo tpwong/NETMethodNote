@@ -1,6 +1,37 @@
-好的，我將代碼修改為使用`appsettings.json`而不是傳統的`App.config`。這是.NET Core和.NET 5+中的標準方式。
+好的，我將移除目標服務（Target Service）相關的功能。以下是更新後的關鍵檔案：
 
-### 首先，創建appsettings.json文件：
+### 1. ProcessResourceInfo.cs (移除目標服務屬性)
+
+```csharp
+namespace ProcessMonitor
+{
+    /// <summary>
+    /// Class to store process resource usage information
+    /// </summary>
+    public class ProcessResourceInfo
+    {
+        /// <summary>Name of the process</summary>
+        public string ProcessName { get; set; }
+        
+        /// <summary>Process ID</summary>
+        public int ProcessId { get; set; }
+        
+        /// <summary>CPU usage as percentage</summary>
+        public double CpuUsage { get; set; }
+        
+        /// <summary>Memory usage in megabytes</summary>
+        public double MemoryUsageMB { get; set; }
+        
+        /// <summary>Memory usage as percentage of total system memory</summary>
+        public double MemoryUsagePercent { get; set; }
+        
+        /// <summary>Process start time</summary>
+        public string StartTime { get; set; }
+    }
+}
+```
+
+### 2. appsettings.json (移除目標服務模式配置)
 
 ```json
 {
@@ -10,14 +41,7 @@
     "OutputToFile": true,
     "MonitorIntervalSeconds": 60,
     "ProcessCount": 10,
-    "TargetServicePatterns": [
-      "MyService",
-      "WebApi",
-      "Worker", 
-      "Api",
-      "DataProcessor",
-      "ServiceHost"
-    ]
+    "DetailedCpuMeasurement": true
   },
   "Logging": {
     "LogLevel": {
@@ -29,13 +53,10 @@
 }
 ```
 
-### 然後，修改配置管理器以使用appsettings.json：
-
-### 1. ConfigurationManager.cs
+### 3. ConfigurationManager.cs (移除目標服務相關配置)
 
 ```csharp
 using System;
-using System.Linq;
 using System.Collections.Generic;
 using System.IO;
 using Microsoft.Extensions.Configuration;
@@ -55,7 +76,8 @@ namespace ProcessMonitor
         public static bool OutputToFile { get; private set; }
         public static int MonitorIntervalSeconds { get; private set; }
         public static int ProcessCount { get; private set; }
-        public static List<string> TargetServicePatterns { get; private set; }
+        public static bool DetailedCpuMeasurement { get; private set; }
+        public static bool ShowMemoryRanking { get; private set; }
 
         /// <summary>
         /// Initialize configuration settings from appsettings.json
@@ -81,11 +103,8 @@ namespace ProcessMonitor
                 OutputToFile = settings.GetValue<bool?>("OutputToFile") ?? true;
                 MonitorIntervalSeconds = settings.GetValue<int?>("MonitorIntervalSeconds") ?? 60;
                 ProcessCount = settings.GetValue<int?>("ProcessCount") ?? 10;
-                
-                // Read target service patterns
-                TargetServicePatterns = settings.GetSection("TargetServicePatterns")
-                    .Get<List<string>>() ?? 
-                    new List<string> { "MyService", "WebApi", "Worker" };
+                DetailedCpuMeasurement = settings.GetValue<bool?>("DetailedCpuMeasurement") ?? true;
+                ShowMemoryRanking = settings.GetValue<bool?>("ShowMemoryRanking") ?? true;
                 
                 // Ensure log directory exists if we're outputting to file
                 if (OutputToFile && !Directory.Exists(LogFolderPath))
@@ -102,7 +121,8 @@ namespace ProcessMonitor
                 OutputToFile = true;
                 MonitorIntervalSeconds = 60;
                 ProcessCount = 10;
-                TargetServicePatterns = new List<string> { "MyService", "WebApi", "Worker" };
+                DetailedCpuMeasurement = true;
+                ShowMemoryRanking = true;
                 
                 // Create logs directory with default values
                 try
@@ -113,19 +133,352 @@ namespace ProcessMonitor
                 catch { }
             }
         }
+        
+        /// <summary>
+        /// Gets the raw configuration object for advanced usage
+        /// </summary>
+        public static IConfiguration GetRawConfiguration()
+        {
+            return _configuration;
+        }
     }
 }
 ```
 
-### 2. 修改Program.cs以反映使用appsettings.json
+### 4. ProcessCollector.cs (簡化進程收集，對所有進程使用相同方法)
+
+```csharp
+using System;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using Microsoft.VisualBasic.Devices;
+
+namespace ProcessMonitor
+{
+    /// <summary>
+    /// Responsible for collecting process information
+    /// </summary>
+    public class ProcessCollector
+    {
+        // Store system memory information to avoid retrieving it for each process
+        private double _totalPhysicalMemoryMB;
+        
+        public ProcessCollector()
+        {
+            // Initialize total system memory on creation
+            InitializeSystemInfo();
+        }
+        
+        private void InitializeSystemInfo()
+        {
+            try
+            {
+                // Get total physical memory
+                ComputerInfo computerInfo = new ComputerInfo();
+                _totalPhysicalMemoryMB = computerInfo.TotalPhysicalMemory / 1024.0 / 1024.0;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error retrieving system information: {ex.Message}");
+                // Fallback to a reasonable value if we can't get the actual memory
+                _totalPhysicalMemoryMB = 8192; // 8 GB default
+            }
+        }
+        
+        /// <summary>
+        /// Asynchronously collect resource usage information for all accessible processes
+        /// </summary>
+        /// <returns>List of process resource information</returns>
+        public async Task<List<ProcessResourceInfo>> CollectProcessResourceInfoAsync(CancellationToken cancellationToken)
+        {
+            var processResources = new List<ProcessResourceInfo>();
+            var processes = Process.GetProcesses();
+            
+            // Create tasks for all processes
+            var tasks = processes.Select(async process => 
+            {
+                try
+                {
+                    // Get CPU usage
+                    double cpuUsage;
+                    if (ConfigurationManager.DetailedCpuMeasurement)
+                    {
+                        // More accurate CPU measurement
+                        cpuUsage = await GetProcessCpuUsageDetailedAsync(process, cancellationToken);
+                    }
+                    else
+                    {
+                        // Quick CPU measurement 
+                        cpuUsage = GetProcessCpuUsageQuick(process);
+                    }
+                    
+                    // Get memory usage in MB
+                    var memoryUsageMB = process.WorkingSet64 / 1024.0 / 1024.0;
+                    
+                    // Calculate memory usage percentage
+                    var memoryUsagePercent = (_totalPhysicalMemoryMB > 0) 
+                        ? (memoryUsageMB / _totalPhysicalMemoryMB) * 100 
+                        : 0;
+                    
+                    // Get process start time (if accessible)
+                    string startTime = "N/A";
+                    try
+                    {
+                        startTime = process.StartTime.ToString("yyyy-MM-dd HH:mm");
+                    }
+                    catch
+                    {
+                        // Some processes may not allow access to their start time
+                    }
+                    
+                    // Return process information
+                    return new ProcessResourceInfo
+                    {
+                        ProcessName = process.ProcessName,
+                        ProcessId = process.Id,
+                        CpuUsage = cpuUsage,
+                        MemoryUsageMB = memoryUsageMB,
+                        MemoryUsagePercent = memoryUsagePercent,
+                        StartTime = startTime
+                    };
+                }
+                catch (Exception)
+                {
+                    // Skip processes that can't be accessed due to permissions
+                    return null;
+                }
+                finally
+                {
+                    // Dispose process object to free resources
+                    try { process.Dispose(); } catch { }
+                }
+            }).ToList();
+            
+            // Wait for all tasks to complete
+            var results = await Task.WhenAll(tasks);
+            
+            // Filter out null results and return
+            return results.Where(p => p != null).ToList();
+        }
+        
+        /// <summary>
+        /// Get a quick estimate of CPU usage for processes
+        /// </summary>
+        private double GetProcessCpuUsageQuick(Process process)
+        {
+            try
+            {
+                // Get the current processor time
+                TimeSpan totalProcessorTime = process.TotalProcessorTime;
+                TimeSpan userProcessorTime = process.UserProcessorTime;
+                
+                // Calculate an approximate CPU usage based on how long the process has been running
+                DateTime startTime;
+                try
+                {
+                    startTime = process.StartTime;
+                }
+                catch
+                {
+                    // If we can't get start time, just return 0
+                    return 0;
+                }
+                
+                TimeSpan uptime = DateTime.Now - startTime;
+                if (uptime.TotalMilliseconds <= 0)
+                    return 0;
+                
+                // Rough estimate: CPU time / uptime / processor count
+                return (totalProcessorTime.TotalMilliseconds / uptime.TotalMilliseconds / Environment.ProcessorCount) * 100;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+        
+        /// <summary>
+        /// Get detailed CPU usage for processes with async/await pattern
+        /// </summary>
+        private async Task<double> GetProcessCpuUsageDetailedAsync(Process process, CancellationToken cancellationToken)
+        {
+            try
+            {
+                // Get initial CPU time and timestamp
+                var startTime = DateTime.UtcNow;
+                var startCpuUsage = process.TotalProcessorTime;
+                
+                // Wait for sampling period
+                await Task.Delay(100, cancellationToken); // 100ms sampling period
+                
+                // Get end CPU time and timestamp
+                var endTime = DateTime.UtcNow;
+                var endCpuUsage = process.TotalProcessorTime;
+                
+                // Calculate CPU usage percentage
+                var cpuUsedMs = (endCpuUsage - startCpuUsage).TotalMilliseconds;
+                var totalMsPassed = (endTime - startTime).TotalMilliseconds;
+                
+                // Adjust for number of CPU cores
+                var cpuUsageTotal = cpuUsedMs / (Environment.ProcessorCount * totalMsPassed) * 100;
+                
+                return cpuUsageTotal;
+            }
+            catch
+            {
+                // Return 0 if there was an error calculating CPU usage
+                return 0;
+            }
+        }
+    }
+}
+```
+
+### 5. MonitoringEngine.cs (更新報告生成，移除目標服務相關內容)
+
+```csharp
+using System;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.Text;
+
+namespace ProcessMonitor
+{
+    /// <summary>
+    /// Main monitoring engine for processes
+    /// </summary>
+    public class MonitoringEngine
+    {
+        /// <summary>
+        /// Start the monitoring loop
+        /// </summary>
+        public async Task StartMonitoringAsync(CancellationToken cancellationToken)
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                // Get current timestamp for this monitoring cycle
+                DateTime currentTime = DateTime.Now;
+                string timeStamp = currentTime.ToString("yyyy-MM-dd HH:mm:ss");
+                
+                // Generate report heading
+                StringBuilder report = new StringBuilder();
+                report.AppendLine($"===== Process Resource Monitor Report =====");
+                report.AppendLine($"Time: {timeStamp}");
+                report.AppendLine();
+                
+                try
+                {
+                    // Asynchronously collect all process resource information
+                    var processCollector = new ProcessCollector();
+                    var processResources = await processCollector.CollectProcessResourceInfoAsync(cancellationToken);
+                    
+                    // Get system memory information
+                    var totalMemory = processResources.Sum(p => p.MemoryUsageMB);
+                    var processCount = processResources.Count;
+                    
+                    // Add system information to report
+                    report.AppendLine($"Total processes monitored: {processCount}");
+                    report.AppendLine($"Total memory usage: {totalMemory:F2} MB");
+                    report.AppendLine();
+                    
+                    // Generate CPU usage ranking
+                    GenerateResourceRanking(report, processResources, 
+                        p => p.CpuUsage, "CPU", ConfigurationManager.ProcessCount);
+                    
+                    report.AppendLine();
+                    
+                    // Generate Memory usage ranking if enabled
+                    if (ConfigurationManager.ShowMemoryRanking)
+                    {
+                        GenerateResourceRanking(report, processResources, 
+                            p => p.MemoryUsagePercent, "Memory", ConfigurationManager.ProcessCount);
+                    }
+                }
+                catch (TaskCanceledException)
+                {
+                    // Normal cancellation, just exit
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    // Log any errors that occur during the monitoring process
+                    report.AppendLine($"Error collecting process information: {ex.Message}");
+                    report.AppendLine($"Stack trace: {ex.StackTrace}");
+                }
+                
+                report.AppendLine();
+                report.AppendLine($"Next update will occur at: {DateTime.Now.AddSeconds(ConfigurationManager.MonitorIntervalSeconds).ToString("yyyy-MM-dd HH:mm:ss")}");
+                report.AppendLine(new string('=', 100));
+                
+                // Output the report based on configuration settings
+                var reporter = new ReportManager();
+                await reporter.OutputReportAsync(report.ToString(), currentTime, cancellationToken);
+                
+                // Wait for the next monitoring interval
+                try
+                {
+                    await Task.Delay(ConfigurationManager.MonitorIntervalSeconds * 1000, cancellationToken);
+                    
+                    // Clear console if configured to output to console
+                    if (ConfigurationManager.OutputToConsole)
+                        Console.Clear();
+                }
+                catch (TaskCanceledException)
+                {
+                    // Normal cancellation, just exit
+                    break;
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Generates a resource usage ranking table for the specified resource
+        /// </summary>
+        private void GenerateResourceRanking(StringBuilder report, List<ProcessResourceInfo> processes, 
+                                          Func<ProcessResourceInfo, double> resourceSelector, 
+                                          string resourceName, int count)
+        {
+            // Sort processes by the specified resource usage and take top N
+            var topProcesses = processes
+                .OrderByDescending(resourceSelector)
+                .Take(count)
+                .ToList();
+            
+            // Add header to report
+            report.AppendLine($"Top {count} processes by {resourceName} usage:");
+            report.AppendLine($"{"Rank".PadRight(5)}{"Process Name".PadRight(30)}{"PID".PadRight(10)}{$"{resourceName} (%)".PadRight(12)}{"Memory (MB)".PadRight(15)}{"Start Time".PadRight(20)}");
+            report.AppendLine(new string('-', 92));
+            
+            // Add each process to report with ranking
+            for (int i = 0; i < topProcesses.Count; i++)
+            {
+                var proc = topProcesses[i];
+                double resourceValue = resourceSelector(proc);
+                
+                report.AppendLine($"{(i+1).ToString().PadRight(5)}" +
+                                 $"{proc.ProcessName.PadRight(30)}" +
+                                 $"{proc.ProcessId.ToString().PadRight(10)}" +
+                                 $"{resourceValue.ToString("F2").PadRight(12)}" +
+                                 $"{proc.MemoryUsageMB.ToString("F2").PadRight(15)}" +
+                                 $"{proc.StartTime.PadRight(20)}");
+            }
+        }
+    }
+}
+```
+
+### 6. Program.cs (更新啟動信息，移除目標服務相關顯示)
 
 ```csharp
 using System;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Text;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
 
 namespace ProcessMonitor
 {
@@ -178,64 +531,66 @@ namespace ProcessMonitor
             Console.WriteLine($"Output to file: {ConfigurationManager.OutputToFile}");
             if (ConfigurationManager.OutputToFile)
                 Console.WriteLine($"Log folder: {ConfigurationManager.LogFolderPath}");
-            Console.WriteLine($"Target service patterns: {string.Join(", ", ConfigurationManager.TargetServicePatterns)}");
+            Console.WriteLine($"Detailed CPU measurement: {ConfigurationManager.DetailedCpuMeasurement}");
+            Console.WriteLine($"Show memory ranking: {ConfigurationManager.ShowMemoryRanking}");
             Console.WriteLine("Note: Non-administrator privileges may limit access to system processes\n");
         }
     }
 }
 ```
 
-### 3. 其餘文件保持不變
+### 變更摘要
 
-ProcessCollector.cs、ReportManager.cs、MonitoringEngine.cs和ProcessResourceInfo.cs的代碼保持不變，因為它們不直接處理配置，而是通過ConfigurationManager類訪問配置。
+1. **移除目標服務相關功能**：
+   - 從 `ProcessResourceInfo` 移除 `IsTargetService` 屬性
+   - 從 `appsettings.json` 移除 `TargetServicePatterns` 配置
+   - 從 `ConfigurationManager` 移除相關設置
+   - 從 `ProcessCollector` 移除 `IsTargetService` 方法和相關邏輯
+   - 更新 `MonitoringEngine` 的報告生成，移除目標服務相關信息
 
-### 更新項目文件（.csproj）以包含所需的NuGet包：
+2. **新增選項**：
+   - 添加 `DetailedCpuMeasurement` 設置以控制是否對所有進程使用詳細的CPU測量
+   - 保留了 `ShowMemoryRanking` 設置以控制是否顯示內存排名
 
-```xml
-<Project Sdk="Microsoft.NET.Sdk">
+3. **簡化流程**：
+   - 現在對所有進程使用相同的測量方法（基於配置設置）
+   - 報告格式更加簡潔，沒有不必要的列
 
-  <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <TargetFramework>net6.0</TargetFramework>
-  </PropertyGroup>
+### 使用說明
 
-  <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Configuration" Version="6.0.0" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="6.0.0" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="6.0.0" />
-  </ItemGroup>
+1. **CPU測量選項**：
+   - `DetailedCpuMeasurement`: 設置為 `true` 以對所有進程使用更準確的CPU測量（100ms的樣本），`false` 則使用快速估算
+   - 這取代了之前僅對目標服務使用詳細測量的方式
 
-  <ItemGroup>
-    <None Update="appsettings.json">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-  </ItemGroup>
+2. **配置示例**：
+   - `MonitorIntervalSeconds`: 監控間隔（秒）
+   - `ProcessCount`: 報告中顯示的進程數量
+   - `ShowMemoryRanking`: 是否顯示內存排名
 
-</Project>
-```
+3. **輸出示例**：
+   ```
+   ===== Process Resource Monitor Report =====
+   Time: 2025-04-15 20:30:00
 
-### 重要說明：
+   Total processes monitored: 156
+   Total memory usage: 8923.45 MB
 
-1. **需要安裝的NuGet包**：
-   - Microsoft.Extensions.Configuration
-   - Microsoft.Extensions.Configuration.Json
-   - Microsoft.Extensions.Configuration.Binder
+   Top 10 processes by CPU usage:
+   Rank  Process Name                   PID       CPU (%)     Memory (MB)   Start Time        
+   ------------------------------------------------------------------------------------
+   1     chrome.exe                     5678      32.12       1024.56       2025-04-15 09:15  
+   2     explorer.exe                   1234      18.67       256.89        2025-04-15 08:30  
+   ...
 
-2. **確保appsettings.json被複製到輸出目錄**：
-   - 在Visual Studio中，右鍵單擊appsettings.json
-   - 選擇"屬性"
-   - 將"複製到輸出目錄"設置為"如果較新則複製"
+   Top 10 processes by Memory usage:
+   Rank  Process Name                   PID       Memory (%)  Memory (MB)   Start Time        
+   ------------------------------------------------------------------------------------
+   1     chrome.exe                     5678      12.54       1024.56       2025-04-15 09:15  
+   2     explorer.exe                   1234      3.14        256.89        2025-04-15 08:30  
+   ...
 
-3. **文件位置**：
-   - appsettings.json應該放在項目的根目錄中
-   - 確保它正確跟踪在版本控制中
+   Next update will occur at: 2025-04-15 20:31:00
+   ====================================================================================================
+   ```
 
-使用appsettings.json的好處：
-
-1. **結構化配置**：JSON格式更加結構化和階層化
-2. **現代標準**：這是.NET Core和.NET 5+的標準配置方式
-3. **運行時重載**：設置`reloadOnChange: true`可以讓應用在配置文件變更時自動重新加載
-4. **更好的集成**：與ASP.NET Core和其他現代.NET功能更好地集成
-5. **類型化配置**：可以將配置節直接綁定到強類型對象
-
-這樣的改動使得您的應用程序更加現代化，並與最新的.NET最佳實踐保持一致。
+這個更新版本移除了目標服務功能，同時保留了CPU和內存使用率的排名功能，並提供了更簡潔的配置選項來控制CPU測量的精確度。
