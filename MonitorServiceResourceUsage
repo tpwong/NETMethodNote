@@ -1,366 +1,278 @@
-好的，我將添加一個根據配置文件中的名稱列表過濾進程的功能，並實現模糊搜尋和大小寫不敏感的比對。
-
-首先，我會更新 ConfigurationManager.cs，然後添加進程過濾功能到 ProcessCollector.cs：
-
-### 1. 更新 ConfigurationManager.cs
+好的，我將按照您的要求，把 Process Name 和 PID 合併成 "ProcessName-PID" 格式作為第一個欄位（而不是用括號格式）。以下是更新的 ReportManager.cs 代碼：
 
 ```csharp
 using System;
-using System.Collections.Generic;
 using System.IO;
-using Microsoft.Extensions.Configuration;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Linq;
+using System.Collections.Generic;
+using System.Globalization;
 
 namespace ProcessMonitor
 {
     /// <summary>
-    /// Manages application configuration settings from appsettings.json
+    /// Responsible for handling output of monitoring reports
     /// </summary>
-    public static class ConfigurationManager
+    public class ReportManager
     {
-        private static IConfiguration _configuration;
+        // Keep track of when we last cleaned up old logs
+        private static DateTime _lastLogCleanupTime = DateTime.MinValue;
         
-        // Configuration settings
-        public static string LogFolderPath { get; private set; }
-        public static bool OutputToConsole { get; private set; }
-        public static bool OutputToFile { get; private set; }
-        public static int MonitorIntervalSeconds { get; private set; }
-        public static int ProcessCount { get; private set; }
-        public static bool DetailedCpuMeasurement { get; private set; }
-        public static bool ShowMemoryRanking { get; private set; }
-        public static bool ShowDetailedProcessInfo { get; private set; }
-        public static int LogRetentionDays { get; private set; }
-        public static int CpuUpdateIntervalMs { get; private set; }
-        public static List<string> ProcessNamesToMonitor { get; private set; }
-        public static bool MonitorOnlySpecifiedProcesses { get; private set; }
-
         /// <summary>
-        /// Initialize configuration settings from appsettings.json
+        /// Output a monitoring report to configured destinations
         /// </summary>
-        public static void Initialize()
+        /// <param name="processResources">The list of process resources to output</param>
+        /// <param name="timestamp">Timestamp for the report</param>
+        /// <param name="cancellationToken">Cancellation token</param>
+        public async Task OutputReportAsync(List<ProcessResourceInfo> processResources, 
+                                           DateTime timestamp, 
+                                           CancellationToken cancellationToken)
+        {
+            // Generate CSV records for current processes
+            string csvRecords = GenerateCSVRecords(processResources, timestamp);
+            
+            // Output to console if configured
+            if (ConfigurationManager.OutputToConsole)
+            {
+                OutputToConsole(processResources, timestamp);
+            }
+            
+            // Output to file if configured
+            if (ConfigurationManager.OutputToFile)
+            {
+                await AppendToCSVFileAsync(csvRecords, timestamp, cancellationToken);
+                
+                // Clean up old log files once per day
+                if ((DateTime.Now - _lastLogCleanupTime).TotalHours >= 24)
+                {
+                    await CleanupOldLogsAsync(cancellationToken);
+                    _lastLogCleanupTime = DateTime.Now;
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Generates CSV records with columns: time, ProcessName-PID, CPU%, memory%
+        /// </summary>
+        private string GenerateCSVRecords(List<ProcessResourceInfo> processResources, DateTime timestamp)
+        {
+            StringBuilder csv = new StringBuilder();
+            
+            // Get the timestamp as string
+            string timeString = timestamp.ToString("yyyy-MM-dd HH:mm:ss");
+            
+            // Sort processes by CPU usage and take top N
+            var topProcesses = processResources
+                .OrderByDescending(p => p.CpuUsage)
+                .Take(ConfigurationManager.ProcessCount)
+                .ToList();
+            
+            // Add each process data row
+            foreach (var proc in topProcesses)
+            {
+                // Format process name with PID using hyphen
+                string processNameWithPid = $"{proc.ProcessName}-{proc.ProcessId}";
+                
+                csv.AppendLine(
+                    $"{timeString}," +
+                    $"{EscapeCSV(processNameWithPid)}," +
+                    $"{proc.CpuUsage.ToString("F2", CultureInfo.InvariantCulture)}," +
+                    $"{proc.MemoryUsagePercent.ToString("F2", CultureInfo.InvariantCulture)}");
+            }
+            
+            return csv.ToString();
+        }
+        
+        /// <summary>
+        /// Escape a string for CSV format
+        /// </summary>
+        private string EscapeCSV(string field)
+        {
+            if (string.IsNullOrEmpty(field))
+                return string.Empty;
+                
+            // If the field contains a comma, newline, or quote, wrap it in quotes
+            if (field.Contains(",") || field.Contains("\"") || field.Contains("\r") || field.Contains("\n"))
+            {
+                // Replace any quotes with double quotes
+                field = field.Replace("\"", "\"\"");
+                
+                // Wrap the field in quotes
+                return $"\"{field}\"";
+            }
+            
+            return field;
+        }
+        
+        /// <summary>
+        /// Output the monitoring results to the console in a readable format
+        /// </summary>
+        private void OutputToConsole(List<ProcessResourceInfo> processResources, DateTime timestamp)
         {
             try
             {
-                // Build configuration from appsettings.json
-                _configuration = new ConfigurationBuilder()
-                    .SetBasePath(Directory.GetCurrentDirectory())
-                    .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
-                    .Build();
+                Console.Clear();
+                Console.WriteLine("Process Resource Monitor - Top Processes");
+                Console.WriteLine($"Time: {timestamp.ToString("yyyy-MM-dd HH:mm:ss")}");
+                Console.WriteLine("--------------------------------------------------");
+                Console.WriteLine("Process Name-PID                CPU%      Memory%");
+                Console.WriteLine("--------------------------------------------------");
                 
-                // Get "ProcessMonitorSettings" section
-                var settings = _configuration.GetSection("ProcessMonitorSettings");
+                // Sort and display processes by CPU usage
+                var topProcesses = processResources
+                    .OrderByDescending(p => p.CpuUsage)
+                    .Take(ConfigurationManager.ProcessCount);
                 
-                // Read config values with defaults
-                LogFolderPath = settings["LogFolderPath"] ?? 
-                    Path.Combine(Directory.GetCurrentDirectory(), "logs");
+                foreach (var proc in topProcesses)
+                {
+                    // Format process name with PID using hyphen
+                    string processNameWithPid = $"{proc.ProcessName}-{proc.ProcessId}";
                     
-                OutputToConsole = settings.GetValue<bool?>("OutputToConsole") ?? true;
-                OutputToFile = settings.GetValue<bool?>("OutputToFile") ?? true;
-                MonitorIntervalSeconds = settings.GetValue<int?>("MonitorIntervalSeconds") ?? 60;
-                ProcessCount = settings.GetValue<int?>("ProcessCount") ?? 10;
-                DetailedCpuMeasurement = settings.GetValue<bool?>("DetailedCpuMeasurement") ?? true;
-                ShowMemoryRanking = settings.GetValue<bool?>("ShowMemoryRanking") ?? true;
-                ShowDetailedProcessInfo = settings.GetValue<bool?>("ShowDetailedProcessInfo") ?? true;
-                LogRetentionDays = settings.GetValue<int?>("LogRetentionDays") ?? 15;
-                CpuUpdateIntervalMs = settings.GetValue<int?>("CpuUpdateIntervalMs") ?? 200;
-                
-                // Get process names to monitor
-                ProcessNamesToMonitor = settings.GetSection("ProcessNamesToMonitor")
-                    .GetChildren()
-                    .Select(x => x.Value)
-                    .Where(x => !string.IsNullOrWhiteSpace(x))
-                    .ToList();
-                
-                // Check if we should monitor only specified processes
-                MonitorOnlySpecifiedProcesses = settings.GetValue<bool?>("MonitorOnlySpecifiedProcesses") ?? false;
-                
-                // Log the processes we're monitoring
-                if (ProcessNamesToMonitor.Count > 0)
-                {
-                    Console.WriteLine($"Monitoring {(MonitorOnlySpecifiedProcesses ? "only" : "including")} these processes:");
-                    foreach (var procName in ProcessNamesToMonitor)
-                    {
-                        Console.WriteLine($"  - {procName}");
-                    }
-                }
-                else if (MonitorOnlySpecifiedProcesses)
-                {
-                    // If no processes are specified but MonitorOnlySpecifiedProcesses is true,
-                    // switch it off to prevent monitoring nothing
-                    Console.WriteLine("Warning: MonitorOnlySpecifiedProcesses is true but no process names specified.");
-                    Console.WriteLine("Monitoring all processes instead.");
-                    MonitorOnlySpecifiedProcesses = false;
+                    if (processNameWithPid.Length > 28)
+                        processNameWithPid = processNameWithPid.Substring(0, 25) + "...";
+                        
+                    Console.WriteLine($"{processNameWithPid.PadRight(30)} {proc.CpuUsage.ToString("F2").PadRight(10)} {proc.MemoryUsagePercent.ToString("F2")}");
                 }
                 
-                // Validate settings
-                if (LogRetentionDays < 1)
-                {
-                    Console.WriteLine("Warning: LogRetentionDays must be at least 1. Setting to default (15).");
-                    LogRetentionDays = 15;
-                }
-                
-                if (CpuUpdateIntervalMs < 100)
-                {
-                    Console.WriteLine("Warning: CpuUpdateIntervalMs must be at least 100ms. Setting to default (200ms).");
-                    CpuUpdateIntervalMs = 200;
-                }
-                
-                // Ensure log directory exists if we're outputting to file
-                if (OutputToFile && !Directory.Exists(LogFolderPath))
-                {
-                    Directory.CreateDirectory(LogFolderPath);
-                    Console.WriteLine($"Created log directory: {LogFolderPath}");
-                }
+                Console.WriteLine("--------------------------------------------------");
+                Console.WriteLine($"Next update in {ConfigurationManager.MonitorIntervalSeconds} seconds");
             }
             catch (Exception ex)
             {
-                // If there's an error reading config, use default values and log the error
-                Console.WriteLine($"Error reading configuration: {ex.Message}. Using default values.");
-                
-                // Set default values
-                LogFolderPath = Path.Combine(Directory.GetCurrentDirectory(), "logs");
-                OutputToConsole = true;
-                OutputToFile = true;
-                MonitorIntervalSeconds = 60;
-                ProcessCount = 10;
-                DetailedCpuMeasurement = true;
-                ShowMemoryRanking = true;
-                ShowDetailedProcessInfo = true;
-                LogRetentionDays = 15;
-                CpuUpdateIntervalMs = 200;
-                ProcessNamesToMonitor = new List<string>();
-                MonitorOnlySpecifiedProcesses = false;
-                
-                // Create logs directory with default values
-                try
-                {
-                    if (OutputToFile && !Directory.Exists(LogFolderPath))
-                    {
-                        Directory.CreateDirectory(LogFolderPath);
-                        Console.WriteLine($"Created log directory: {LogFolderPath}");
-                    }
-                }
-                catch (Exception dirEx)
-                {
-                    Console.WriteLine($"Failed to create log directory: {dirEx.Message}");
-                } 
+                Console.WriteLine($"Error writing to console: {ex.Message}");
             }
         }
         
         /// <summary>
-        /// Gets the raw configuration object for advanced usage
+        /// Append the records to a CSV file
         /// </summary>
-        public static IConfiguration GetRawConfiguration()
+        private async Task AppendToCSVFileAsync(string csvRecords, DateTime timestamp, CancellationToken cancellationToken)
         {
-            return _configuration;
-        }
-    }
-}
-```
-
-### 2. 更新 ProcessCollector.cs 添加進程過濾功能
-
-```csharp
-public async Task<List<ProcessResourceInfo>> CollectProcessResourceInfoAsync(CancellationToken cancellationToken)
-{
-    var processResources = new List<ProcessResourceInfo>();
-    var processes = Process.GetProcesses();
-    
-    // Create tasks for all processes
-    var tasks = processes.Select(async process => 
-    {
-        try
-        {
-            // Check if we should monitor this process
-            string processName = process.ProcessName;
-            
-            // If we're only monitoring specific processes and this process doesn't match any pattern, skip it
-            if (ConfigurationManager.MonitorOnlySpecifiedProcesses && 
-                !MatchesAnyProcessPattern(processName))
-            {
-                return null;
-            }
-            
-            // Get CPU usage using our persistent tracker
-            double cpuUsage = GetCpuUsage(process);
-            
-            // Get memory usage in MB
-            var memoryUsageMB = process.WorkingSet64 / 1024.0 / 1024.0;
-            
-            // Calculate memory usage percentage
-            var memoryUsagePercent = (_totalPhysicalMemoryMB > 0) 
-                ? (memoryUsageMB / _totalPhysicalMemoryMB) * 100 
-                : 0;
-            
-            // Get process start time (if accessible)
-            string startTime = "N/A";
             try
             {
-                startTime = process.StartTime.ToString("yyyy-MM-dd HH:mm");
+                // Ensure log directory exists
+                if (!Directory.Exists(ConfigurationManager.LogFolderPath))
+                {
+                    try
+                    {
+                        Directory.CreateDirectory(ConfigurationManager.LogFolderPath);
+                        Console.WriteLine($"Created log directory: {ConfigurationManager.LogFolderPath}");
+                    }
+                    catch (Exception dirEx)
+                    {
+                        Console.WriteLine($"Failed to create log directory: {dirEx.Message}");
+                        return; // Cannot proceed without a log directory
+                    }
+                }
+                
+                // Create timestamped filename with CSV extension
+                string filename = $"ProcessMonitor_{timestamp.ToString("yyyy-MM-dd")}.csv";
+                string filePath = Path.Combine(ConfigurationManager.LogFolderPath, filename);
+                
+                // Check if we need to add headers (only for new files)
+                bool isNewFile = !File.Exists(filePath) || new FileInfo(filePath).Length == 0;
+                
+                // Open file for append
+                using (StreamWriter writer = new StreamWriter(filePath, true, Encoding.UTF8))
+                {
+                    // Add header if this is a new file
+                    if (isNewFile)
+                    {
+                        await writer.WriteLineAsync("Time,ProcessName-PID,CPU%,Memory%");
+                    }
+                    
+                    // Append the records
+                    await writer.WriteAsync(csvRecords);
+                    await writer.FlushAsync();
+                }
+                
+                Console.WriteLine($"Records appended to: {filePath}");
             }
-            catch
+            catch (Exception ex)
             {
-                // Some processes may not allow access to their start time
+                Console.WriteLine($"Error appending to CSV file: {ex.Message}");
             }
-            
-            // Get process description
-            string description = "N/A";
-            if (_processDescriptions.ContainsKey(process.Id))
-                description = _processDescriptions[process.Id];
-            
-            // Get service name
-            string serviceName = string.Empty;
-            if (_processServices.ContainsKey(process.Id))
-                serviceName = _processServices[process.Id];
-            
-            // Return process information
-            return new ProcessResourceInfo
-            {
-                ProcessName = processName,
-                ProcessId = process.Id,
-                CpuUsage = cpuUsage,
-                MemoryUsageMB = memoryUsageMB,
-                MemoryUsagePercent = memoryUsagePercent,
-                StartTime = startTime,
-                Description = description,
-                ServiceName = serviceName
-            };
         }
-        catch (Exception)
-        {
-            // Skip processes that can't be accessed due to permissions
-            return null;
-        }
-        finally
-        {
-            // Dispose process object to free resources
-            try { process.Dispose(); } catch { }
-        }
-    }).ToList();
-    
-    // Wait for all tasks to complete
-    var results = await Task.WhenAll(tasks);
-    
-    // Filter out null results and return
-    return results.Where(p => p != null).ToList();
-}
-
-/// <summary>
-/// Checks if a process name matches any of the configured patterns
-/// </summary>
-/// <param name="processName">The process name to check</param>
-/// <returns>True if it matches any pattern, false otherwise</returns>
-private bool MatchesAnyProcessPattern(string processName)
-{
-    // If no patterns are specified, return true
-    if (ConfigurationManager.ProcessNamesToMonitor.Count == 0)
-        return true;
         
-    // Case insensitive fuzzy match against all patterns
-    foreach (var pattern in ConfigurationManager.ProcessNamesToMonitor)
-    {
-        // If pattern is empty, skip it
-        if (string.IsNullOrWhiteSpace(pattern))
-            continue;
-            
-        // Check for fuzzy match (case insensitive contains)
-        if (processName.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
-            return true;
-    }
-    
-    return false;
-}
-```
-
-### 3. 更新 appsettings.json 添加進程過濾設定
-
-```json
-{
-  "ProcessMonitorSettings": {
-    "LogFolderPath": "logs",
-    "OutputToConsole": true,
-    "OutputToFile": true,
-    "MonitorIntervalSeconds": 60,
-    "ProcessCount": 10,
-    "DetailedCpuMeasurement": true,
-    "ShowMemoryRanking": true,
-    "ShowDetailedProcessInfo": true,
-    "LogRetentionDays": 15,
-    "CpuUpdateIntervalMs": 200,
-    "MonitorOnlySpecifiedProcesses": true,
-    "ProcessNamesToMonitor": [
-      "chrome",
-      "firefox",
-      "edge",
-      "notepad",
-      "excel",
-      "word"
-    ]
-  },
-  "Logging": {
-    "LogLevel": {
-      "Default": "Information",
-      "Microsoft": "Warning",
-      "System": "Warning"
-    }
-  }
-}
-```
-
-### 4. 更新 Program.cs 顯示過濾資訊
-
-```csharp
-private static void DisplayStartupInfo()
-{
-    Console.WriteLine("Process Resource Monitor Started...");
-    Console.WriteLine($"Time: {DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")}");
-    Console.WriteLine($"Monitoring interval: {ConfigurationManager.MonitorIntervalSeconds} seconds");
-    Console.WriteLine($"Output to console: {ConfigurationManager.OutputToConsole}");
-    Console.WriteLine($"Output to file: {ConfigurationManager.OutputToFile}");
-    
-    if (ConfigurationManager.OutputToFile)
-    {
-        Console.WriteLine($"CSV folder: {ConfigurationManager.LogFolderPath}");
-        Console.WriteLine($"CSV retention: {ConfigurationManager.LogRetentionDays} days");
-    }
-    
-    // Display process filter info
-    if (ConfigurationManager.MonitorOnlySpecifiedProcesses)
-    {
-        Console.WriteLine("Monitoring ONLY processes matching these patterns (case insensitive):");
-        foreach (var procName in ConfigurationManager.ProcessNamesToMonitor)
+        /// <summary>
+        /// Clean up CSV files older than the retention period
+        /// </summary>
+        private async Task CleanupOldLogsAsync(CancellationToken cancellationToken)
         {
-            Console.WriteLine($"  - {procName}");
+            try
+            {
+                // Calculate the cutoff date for log retention
+                DateTime cutoffDate = DateTime.Now.AddDays(-ConfigurationManager.LogRetentionDays);
+                
+                // Get all CSV files
+                DirectoryInfo logDir = new DirectoryInfo(ConfigurationManager.LogFolderPath);
+                if (!logDir.Exists)
+                    return;
+                
+                // Find files older than the cutoff date
+                var oldFiles = logDir.GetFiles("ProcessMonitor_*.csv")
+                    .Where(f => f.LastWriteTime < cutoffDate)
+                    .ToList();
+                
+                if (oldFiles.Count > 0)
+                {
+                    Console.WriteLine($"Cleaning up {oldFiles.Count} CSV files older than {ConfigurationManager.LogRetentionDays} days...");
+                    
+                    // Delete old files
+                    foreach (var file in oldFiles)
+                    {
+                        try
+                        {
+                            // Check for cancellation
+                            cancellationToken.ThrowIfCancellationRequested();
+                            
+                            // Delete the file
+                            file.Delete();
+                            
+                            // Pause briefly to avoid overwhelming the file system
+                            await Task.Delay(20, cancellationToken);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            throw; // Rethrow cancellation exception
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Failed to delete old CSV file {file.Name}: {ex.Message}");
+                        }
+                    }
+                    
+                    Console.WriteLine("CSV cleanup completed.");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Just bubble up cancellation exceptions
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error during CSV cleanup: {ex.Message}");
+            }
         }
     }
-    else if (ConfigurationManager.ProcessNamesToMonitor.Count > 0)
-    {
-        Console.WriteLine("Monitoring ALL processes, but highlighting these patterns:");
-        foreach (var procName in ConfigurationManager.ProcessNamesToMonitor)
-        {
-            Console.WriteLine($"  - {procName}");
-        }
-    }
-    else
-    {
-        Console.WriteLine($"Monitoring top {ConfigurationManager.ProcessCount} processes by resource usage");
-    }
-    
-    Console.WriteLine($"Detailed CPU measurement: {ConfigurationManager.DetailedCpuMeasurement}");
-    Console.WriteLine($"CPU update interval: {ConfigurationManager.CpuUpdateIntervalMs}ms");
-    Console.WriteLine("Note: Non-administrator privileges may limit access to system processes\n");
 }
 ```
 
-### 功能說明
+### 變更摘要：
 
-1. **配置進程名稱過濾**
-   - 在 appsettings.json 中添加 `ProcessNamesToMonitor` 陣列，列出需要監控的進程名稱模式
-   - 添加 `MonitorOnlySpecifiedProcesses` 布林值選項，決定是否只監控指定的進程
+1. **進程名稱格式**
+   - 將進程名稱和 PID 使用連字符連接為 "ProcessName-PID" 格式
+   - 應用於 CSV 輸出和控制台顯示
 
-2. **模糊匹配實現**
-   - 使用 `IndexOf` 方法和 `StringComparison.OrdinalIgnoreCase` 選項實現大小寫不敏感的模糊搜尋
-   - 如果進程名稱包含配置中的任何一個模式字符串，則視為匹配
+2. **CSV 標題更新**
+   - 將 CSV 標題列改為 "Time,ProcessName-PID,CPU%,Memory%"
+   - 反映了資料欄位的實際格式
 
-3. **進程過濾邏輯**
-   - 如果 `MonitorOnlySpecifiedProcesses` 為 true，只收
+3. **控制台輸出**
+   - 更新控制台標題為 "Process Name-PID"
+   - 顯示格式保持一致，使用連字符分隔進程名稱和 PID
+
+這種格式更簡潔，且符合您的需求。使用連字符 (-) 將進程名稱和 PID 連接起來，可以在 Excel 中更輕鬆地過濾和排序，同時保持資料的完整性。每一行資料仍然包含四個欄位：時間、進程名稱-PID、CPU 百分比和記憶體百分比。
