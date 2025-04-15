@@ -1,151 +1,6 @@
-好的，我將移除目標服務（Target Service）相關的功能。以下是更新後的關鍵檔案：
+了解，那我們可以使用其他方法獲取系統記憶體信息。我將更新代碼以使用標準的 Win32 API 或 .NET 內建的方法來取得總記憶體，而不依賴於 Microsoft.VisualBasic.Devices。
 
-### 1. ProcessResourceInfo.cs (移除目標服務屬性)
-
-```csharp
-namespace ProcessMonitor
-{
-    /// <summary>
-    /// Class to store process resource usage information
-    /// </summary>
-    public class ProcessResourceInfo
-    {
-        /// <summary>Name of the process</summary>
-        public string ProcessName { get; set; }
-        
-        /// <summary>Process ID</summary>
-        public int ProcessId { get; set; }
-        
-        /// <summary>CPU usage as percentage</summary>
-        public double CpuUsage { get; set; }
-        
-        /// <summary>Memory usage in megabytes</summary>
-        public double MemoryUsageMB { get; set; }
-        
-        /// <summary>Memory usage as percentage of total system memory</summary>
-        public double MemoryUsagePercent { get; set; }
-        
-        /// <summary>Process start time</summary>
-        public string StartTime { get; set; }
-    }
-}
-```
-
-### 2. appsettings.json (移除目標服務模式配置)
-
-```json
-{
-  "ProcessMonitorSettings": {
-    "LogFolderPath": "C:\\ProcessMonitorLogs",
-    "OutputToConsole": true,
-    "OutputToFile": true,
-    "MonitorIntervalSeconds": 60,
-    "ProcessCount": 10,
-    "DetailedCpuMeasurement": true
-  },
-  "Logging": {
-    "LogLevel": {
-      "Default": "Information",
-      "Microsoft": "Warning",
-      "System": "Warning"
-    }
-  }
-}
-```
-
-### 3. ConfigurationManager.cs (移除目標服務相關配置)
-
-```csharp
-using System;
-using System.Collections.Generic;
-using System.IO;
-using Microsoft.Extensions.Configuration;
-
-namespace ProcessMonitor
-{
-    /// <summary>
-    /// Manages application configuration settings from appsettings.json
-    /// </summary>
-    public static class ConfigurationManager
-    {
-        private static IConfiguration _configuration;
-        
-        // Configuration settings
-        public static string LogFolderPath { get; private set; }
-        public static bool OutputToConsole { get; private set; }
-        public static bool OutputToFile { get; private set; }
-        public static int MonitorIntervalSeconds { get; private set; }
-        public static int ProcessCount { get; private set; }
-        public static bool DetailedCpuMeasurement { get; private set; }
-        public static bool ShowMemoryRanking { get; private set; }
-
-        /// <summary>
-        /// Initialize configuration settings from appsettings.json
-        /// </summary>
-        public static void Initialize()
-        {
-            try
-            {
-                // Build configuration from appsettings.json
-                _configuration = new ConfigurationBuilder()
-                    .SetBasePath(Directory.GetCurrentDirectory())
-                    .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
-                    .Build();
-                
-                // Get "ProcessMonitorSettings" section
-                var settings = _configuration.GetSection("ProcessMonitorSettings");
-                
-                // Read config values with defaults
-                LogFolderPath = settings["LogFolderPath"] ?? 
-                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
-                    
-                OutputToConsole = settings.GetValue<bool?>("OutputToConsole") ?? true;
-                OutputToFile = settings.GetValue<bool?>("OutputToFile") ?? true;
-                MonitorIntervalSeconds = settings.GetValue<int?>("MonitorIntervalSeconds") ?? 60;
-                ProcessCount = settings.GetValue<int?>("ProcessCount") ?? 10;
-                DetailedCpuMeasurement = settings.GetValue<bool?>("DetailedCpuMeasurement") ?? true;
-                ShowMemoryRanking = settings.GetValue<bool?>("ShowMemoryRanking") ?? true;
-                
-                // Ensure log directory exists if we're outputting to file
-                if (OutputToFile && !Directory.Exists(LogFolderPath))
-                    Directory.CreateDirectory(LogFolderPath);
-            }
-            catch (Exception ex)
-            {
-                // If there's an error reading config, use default values and log the error
-                Console.WriteLine($"Error reading configuration: {ex.Message}. Using default values.");
-                
-                // Set default values
-                LogFolderPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
-                OutputToConsole = true;
-                OutputToFile = true;
-                MonitorIntervalSeconds = 60;
-                ProcessCount = 10;
-                DetailedCpuMeasurement = true;
-                ShowMemoryRanking = true;
-                
-                // Create logs directory with default values
-                try
-                {
-                    if (OutputToFile && !Directory.Exists(LogFolderPath))
-                        Directory.CreateDirectory(LogFolderPath);
-                }
-                catch { }
-            }
-        }
-        
-        /// <summary>
-        /// Gets the raw configuration object for advanced usage
-        /// </summary>
-        public static IConfiguration GetRawConfiguration()
-        {
-            return _configuration;
-        }
-    }
-}
-```
-
-### 4. ProcessCollector.cs (簡化進程收集，對所有進程使用相同方法)
+### 更新 ProcessCollector.cs (使用替代方法獲取系統記憶體)
 
 ```csharp
 using System;
@@ -154,7 +9,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
-using Microsoft.VisualBasic.Devices;
+using System.Runtime.InteropServices;
 
 namespace ProcessMonitor
 {
@@ -166,6 +21,29 @@ namespace ProcessMonitor
         // Store system memory information to avoid retrieving it for each process
         private double _totalPhysicalMemoryMB;
         
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+        private class MEMORYSTATUSEX
+        {
+            public uint dwLength;
+            public uint dwMemoryLoad;
+            public ulong ullTotalPhys;
+            public ulong ullAvailPhys;
+            public ulong ullTotalPageFile;
+            public ulong ullAvailPageFile;
+            public ulong ullTotalVirtual;
+            public ulong ullAvailVirtual;
+            public ulong ullAvailExtendedVirtual;
+            
+            public MEMORYSTATUSEX()
+            {
+                dwLength = (uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX));
+            }
+        }
+        
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GlobalMemoryStatusEx([In, Out] MEMORYSTATUSEX lpBuffer);
+        
         public ProcessCollector()
         {
             // Initialize total system memory on creation
@@ -176,13 +54,39 @@ namespace ProcessMonitor
         {
             try
             {
-                // Get total physical memory
-                ComputerInfo computerInfo = new ComputerInfo();
-                _totalPhysicalMemoryMB = computerInfo.TotalPhysicalMemory / 1024.0 / 1024.0;
+                // Get total physical memory using Windows API
+                var memoryStatus = new MEMORYSTATUSEX();
+                if (GlobalMemoryStatusEx(memoryStatus))
+                {
+                    _totalPhysicalMemoryMB = memoryStatus.ullTotalPhys / 1024.0 / 1024.0;
+                }
+                else
+                {
+                    // If the API call fails, try alternative method
+                    try 
+                    {
+                        // Alternative approach: Try using PerformanceCounter
+                        using (var ramCounter = new PerformanceCounter("Memory", "Available MBytes"))
+                        {
+                            // This only gives available memory, not total
+                            // For simplicity, we'll estimate total based on typical usage
+                            var availableMB = ramCounter.NextValue();
+                            // Assume system is using ~30% of RAM, so total is roughly available/(1-0.3)
+                            _totalPhysicalMemoryMB = availableMB / 0.7;
+                        }
+                    }
+                    catch
+                    {
+                        // Last resort: Just use a reasonable default value
+                        _totalPhysicalMemoryMB = 8192; // 8 GB default
+                    }
+                }
+                
+                Console.WriteLine($"Detected total physical memory: {_totalPhysicalMemoryMB:F2} MB");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error retrieving system information: {ex.Message}");
+                Console.WriteLine($"Error retrieving system memory information: {ex.Message}");
                 // Fallback to a reasonable value if we can't get the actual memory
                 _totalPhysicalMemoryMB = 8192; // 8 GB default
             }
@@ -337,260 +241,45 @@ namespace ProcessMonitor
 }
 ```
 
-### 5. MonitoringEngine.cs (更新報告生成，移除目標服務相關內容)
+### 更新 csproj 檔案 (移除 Microsoft.VisualBasic 參考)
 
-```csharp
-using System;
-using System.Diagnostics;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Collections.Generic;
-using System.Text;
+```xml
+<Project Sdk="Microsoft.NET.Sdk">
 
-namespace ProcessMonitor
-{
-    /// <summary>
-    /// Main monitoring engine for processes
-    /// </summary>
-    public class MonitoringEngine
-    {
-        /// <summary>
-        /// Start the monitoring loop
-        /// </summary>
-        public async Task StartMonitoringAsync(CancellationToken cancellationToken)
-        {
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                // Get current timestamp for this monitoring cycle
-                DateTime currentTime = DateTime.Now;
-                string timeStamp = currentTime.ToString("yyyy-MM-dd HH:mm:ss");
-                
-                // Generate report heading
-                StringBuilder report = new StringBuilder();
-                report.AppendLine($"===== Process Resource Monitor Report =====");
-                report.AppendLine($"Time: {timeStamp}");
-                report.AppendLine();
-                
-                try
-                {
-                    // Asynchronously collect all process resource information
-                    var processCollector = new ProcessCollector();
-                    var processResources = await processCollector.CollectProcessResourceInfoAsync(cancellationToken);
-                    
-                    // Get system memory information
-                    var totalMemory = processResources.Sum(p => p.MemoryUsageMB);
-                    var processCount = processResources.Count;
-                    
-                    // Add system information to report
-                    report.AppendLine($"Total processes monitored: {processCount}");
-                    report.AppendLine($"Total memory usage: {totalMemory:F2} MB");
-                    report.AppendLine();
-                    
-                    // Generate CPU usage ranking
-                    GenerateResourceRanking(report, processResources, 
-                        p => p.CpuUsage, "CPU", ConfigurationManager.ProcessCount);
-                    
-                    report.AppendLine();
-                    
-                    // Generate Memory usage ranking if enabled
-                    if (ConfigurationManager.ShowMemoryRanking)
-                    {
-                        GenerateResourceRanking(report, processResources, 
-                            p => p.MemoryUsagePercent, "Memory", ConfigurationManager.ProcessCount);
-                    }
-                }
-                catch (TaskCanceledException)
-                {
-                    // Normal cancellation, just exit
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    // Log any errors that occur during the monitoring process
-                    report.AppendLine($"Error collecting process information: {ex.Message}");
-                    report.AppendLine($"Stack trace: {ex.StackTrace}");
-                }
-                
-                report.AppendLine();
-                report.AppendLine($"Next update will occur at: {DateTime.Now.AddSeconds(ConfigurationManager.MonitorIntervalSeconds).ToString("yyyy-MM-dd HH:mm:ss")}");
-                report.AppendLine(new string('=', 100));
-                
-                // Output the report based on configuration settings
-                var reporter = new ReportManager();
-                await reporter.OutputReportAsync(report.ToString(), currentTime, cancellationToken);
-                
-                // Wait for the next monitoring interval
-                try
-                {
-                    await Task.Delay(ConfigurationManager.MonitorIntervalSeconds * 1000, cancellationToken);
-                    
-                    // Clear console if configured to output to console
-                    if (ConfigurationManager.OutputToConsole)
-                        Console.Clear();
-                }
-                catch (TaskCanceledException)
-                {
-                    // Normal cancellation, just exit
-                    break;
-                }
-            }
-        }
-        
-        /// <summary>
-        /// Generates a resource usage ranking table for the specified resource
-        /// </summary>
-        private void GenerateResourceRanking(StringBuilder report, List<ProcessResourceInfo> processes, 
-                                          Func<ProcessResourceInfo, double> resourceSelector, 
-                                          string resourceName, int count)
-        {
-            // Sort processes by the specified resource usage and take top N
-            var topProcesses = processes
-                .OrderByDescending(resourceSelector)
-                .Take(count)
-                .ToList();
-            
-            // Add header to report
-            report.AppendLine($"Top {count} processes by {resourceName} usage:");
-            report.AppendLine($"{"Rank".PadRight(5)}{"Process Name".PadRight(30)}{"PID".PadRight(10)}{$"{resourceName} (%)".PadRight(12)}{"Memory (MB)".PadRight(15)}{"Start Time".PadRight(20)}");
-            report.AppendLine(new string('-', 92));
-            
-            // Add each process to report with ranking
-            for (int i = 0; i < topProcesses.Count; i++)
-            {
-                var proc = topProcesses[i];
-                double resourceValue = resourceSelector(proc);
-                
-                report.AppendLine($"{(i+1).ToString().PadRight(5)}" +
-                                 $"{proc.ProcessName.PadRight(30)}" +
-                                 $"{proc.ProcessId.ToString().PadRight(10)}" +
-                                 $"{resourceValue.ToString("F2").PadRight(12)}" +
-                                 $"{proc.MemoryUsageMB.ToString("F2").PadRight(15)}" +
-                                 $"{proc.StartTime.PadRight(20)}");
-            }
-        }
-    }
-}
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net6.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Configuration" Version="6.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="6.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="6.0.0" />
+    <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="6.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>
 ```
 
-### 6. Program.cs (更新啟動信息，移除目標服務相關顯示)
+### 說明
 
-```csharp
-using System;
-using System.Threading;
-using System.Threading.Tasks;
+1. **系統記憶體獲取**：
+   - 主要方法：使用 Win32 API 的 `GlobalMemoryStatusEx` 函數獲取系統記憶體信息
+   - 備用方法 1：使用 `PerformanceCounter` 類獲取可用記憶體並估算總記憶體
+   - 備用方法 2：如果以上方法都失敗，則使用預設值（8GB）
 
-namespace ProcessMonitor
-{
-    class Program
-    {
-        private static CancellationTokenSource _cancellationTokenSource;
+2. **依賴庫更改**：
+   - 移除 `Microsoft.VisualBasic` 參考
+   - 添加 `System.Diagnostics.PerformanceCounter` 參考（用於備用方法）
 
-        static async Task Main(string[] args)
-        {
-            try
-            {
-                // Initialize application configuration from appsettings.json
-                ConfigurationManager.Initialize();
-                
-                // Create cancellation token source for graceful shutdown
-                _cancellationTokenSource = new CancellationTokenSource();
+3. **新增功能**：
+   - 在啟動時顯示偵測到的系統總記憶體
+   - 使用多層次的備用方法確保在各種環境下都能工作
 
-                // Handle Ctrl+C to gracefully exit
-                Console.CancelKeyPress += (sender, e) => {
-                    e.Cancel = true;
-                    _cancellationTokenSource.Cancel();
-                    Console.WriteLine("Shutting down...");
-                };
-                
-                // Display startup message
-                DisplayStartupInfo();
-                
-                // Main monitoring loop
-                MonitoringEngine monitor = new MonitoringEngine();
-                await monitor.StartMonitoringAsync(_cancellationTokenSource.Token);
-                
-                Console.WriteLine("Process monitor has been shut down.");
-            }
-            catch (Exception ex)
-            {
-                // Handle any unhandled exceptions
-                Console.WriteLine($"Fatal error: {ex.Message}");
-                Console.WriteLine($"Stack trace: {ex.StackTrace}");
-                Console.WriteLine("Press any key to exit...");
-                Console.ReadKey();
-            }
-        }
-        
-        private static void DisplayStartupInfo()
-        {
-            Console.WriteLine("Process Resource Monitor Started...");
-            Console.WriteLine($"Time: {DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")}");
-            Console.WriteLine($"Monitoring top {ConfigurationManager.ProcessCount} processes every {ConfigurationManager.MonitorIntervalSeconds} seconds");
-            Console.WriteLine($"Output to console: {ConfigurationManager.OutputToConsole}");
-            Console.WriteLine($"Output to file: {ConfigurationManager.OutputToFile}");
-            if (ConfigurationManager.OutputToFile)
-                Console.WriteLine($"Log folder: {ConfigurationManager.LogFolderPath}");
-            Console.WriteLine($"Detailed CPU measurement: {ConfigurationManager.DetailedCpuMeasurement}");
-            Console.WriteLine($"Show memory ranking: {ConfigurationManager.ShowMemoryRanking}");
-            Console.WriteLine("Note: Non-administrator privileges may limit access to system processes\n");
-        }
-    }
-}
-```
-
-### 變更摘要
-
-1. **移除目標服務相關功能**：
-   - 從 `ProcessResourceInfo` 移除 `IsTargetService` 屬性
-   - 從 `appsettings.json` 移除 `TargetServicePatterns` 配置
-   - 從 `ConfigurationManager` 移除相關設置
-   - 從 `ProcessCollector` 移除 `IsTargetService` 方法和相關邏輯
-   - 更新 `MonitoringEngine` 的報告生成，移除目標服務相關信息
-
-2. **新增選項**：
-   - 添加 `DetailedCpuMeasurement` 設置以控制是否對所有進程使用詳細的CPU測量
-   - 保留了 `ShowMemoryRanking` 設置以控制是否顯示內存排名
-
-3. **簡化流程**：
-   - 現在對所有進程使用相同的測量方法（基於配置設置）
-   - 報告格式更加簡潔，沒有不必要的列
-
-### 使用說明
-
-1. **CPU測量選項**：
-   - `DetailedCpuMeasurement`: 設置為 `true` 以對所有進程使用更準確的CPU測量（100ms的樣本），`false` 則使用快速估算
-   - 這取代了之前僅對目標服務使用詳細測量的方式
-
-2. **配置示例**：
-   - `MonitorIntervalSeconds`: 監控間隔（秒）
-   - `ProcessCount`: 報告中顯示的進程數量
-   - `ShowMemoryRanking`: 是否顯示內存排名
-
-3. **輸出示例**：
-   ```
-   ===== Process Resource Monitor Report =====
-   Time: 2025-04-15 20:30:00
-
-   Total processes monitored: 156
-   Total memory usage: 8923.45 MB
-
-   Top 10 processes by CPU usage:
-   Rank  Process Name                   PID       CPU (%)     Memory (MB)   Start Time        
-   ------------------------------------------------------------------------------------
-   1     chrome.exe                     5678      32.12       1024.56       2025-04-15 09:15  
-   2     explorer.exe                   1234      18.67       256.89        2025-04-15 08:30  
-   ...
-
-   Top 10 processes by Memory usage:
-   Rank  Process Name                   PID       Memory (%)  Memory (MB)   Start Time        
-   ------------------------------------------------------------------------------------
-   1     chrome.exe                     5678      12.54       1024.56       2025-04-15 09:15  
-   2     explorer.exe                   1234      3.14        256.89        2025-04-15 08:30  
-   ...
-
-   Next update will occur at: 2025-04-15 20:31:00
-   ====================================================================================================
-   ```
-
-這個更新版本移除了目標服務功能，同時保留了CPU和內存使用率的排名功能，並提供了更簡潔的配置選項來控制CPU測量的精確度。
+這個方法使用了標準的 Win32 API 和 .NET 內建的功能，不需要依賴 Microsoft.
