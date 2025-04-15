@@ -1,0 +1,299 @@
+using System;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading;
+using System.Collections.Generic;
+using System.IO;
+using System.Configuration;
+using System.Text;
+using System.Reflection;
+
+namespace ProcessMonitor
+{
+    class Program
+    {
+        // Configuration settings
+        private static string _logFolderPath;
+        private static bool _outputToConsole;
+        private static bool _outputToFile;
+        private static int _monitorIntervalSeconds;
+        private static int _processCount;
+
+        static void Main(string[] args)
+        {
+            try
+            {
+                // Initialize application configuration
+                InitializeConfig();
+                
+                // Display startup message
+                Console.WriteLine("Process Resource Monitor Started...");
+                Console.WriteLine($"Time: {DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")}");
+                Console.WriteLine($"Monitoring top {_processCount} processes every {_monitorIntervalSeconds} seconds");
+                Console.WriteLine($"Output to console: {_outputToConsole}");
+                Console.WriteLine($"Output to file: {_outputToFile}");
+                if (_outputToFile)
+                    Console.WriteLine($"Log folder: {_logFolderPath}");
+                Console.WriteLine("Note: Non-administrator privileges may limit access to system processes\n");
+                
+                // Main monitoring loop
+                while (true)
+                {
+                    // Get current timestamp for this monitoring cycle
+                    DateTime currentTime = DateTime.Now;
+                    string timeStamp = currentTime.ToString("yyyy-MM-dd HH:mm:ss");
+                    
+                    // Generate report heading
+                    StringBuilder report = new StringBuilder();
+                    report.AppendLine($"===== Process Resource Monitor Report =====");
+                    report.AppendLine($"Time: {timeStamp}");
+                    report.AppendLine();
+                    
+                    try
+                    {
+                        // Collect all process resource information
+                        var processResources = CollectProcessResourceInfo();
+                        
+                        // Sort processes by CPU usage and take top N
+                        var topProcesses = processResources
+                            .OrderByDescending(p => p.CpuUsage)
+                            .Take(_processCount)
+                            .ToList();
+                        
+                        // Add header to report
+                        report.AppendLine($"Top {_processCount} processes by CPU usage:");
+                        report.AppendLine($"{"Process Name".PadRight(30)}{"PID".PadRight(10)}{"CPU (%)".PadRight(10)}{"Memory (MB)".PadRight(15)}{"Start Time".PadRight(20)}");
+                        report.AppendLine(new string('-', 85));
+                        
+                        // Add each process to report
+                        foreach (var proc in topProcesses)
+                        {
+                            report.AppendLine($"{proc.ProcessName.PadRight(30)}" +
+                                             $"{proc.ProcessId.ToString().PadRight(10)}" +
+                                             $"{proc.CpuUsage.ToString("F2").PadRight(10)}" +
+                                             $"{proc.MemoryUsageMB.ToString("F2").PadRight(15)}" +
+                                             $"{proc.StartTime.PadRight(20)}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        // Log any errors that occur during the monitoring process
+                        report.AppendLine($"Error collecting process information: {ex.Message}");
+                        report.AppendLine($"Stack trace: {ex.StackTrace}");
+                    }
+                    
+                    report.AppendLine();
+                    report.AppendLine($"Next update will occur at: {DateTime.Now.AddSeconds(_monitorIntervalSeconds).ToString("yyyy-MM-dd HH:mm:ss")}");
+                    report.AppendLine(new string('=', 50));
+                    
+                    // Output the report based on configuration settings
+                    OutputReport(report.ToString(), currentTime);
+                    
+                    // Wait for the next monitoring interval
+                    Thread.Sleep(_monitorIntervalSeconds * 1000);
+                    
+                    // Clear console if configured to output to console
+                    if (_outputToConsole)
+                        Console.Clear();
+                }
+            }
+            catch (Exception ex)
+            {
+                // Handle any unhandled exceptions
+                Console.WriteLine($"Fatal error: {ex.Message}");
+                Console.WriteLine($"Stack trace: {ex.StackTrace}");
+                Console.WriteLine("Press any key to exit...");
+                Console.ReadKey();
+            }
+        }
+        
+        /// <summary>
+        /// Initialize application configuration settings from app.config
+        /// </summary>
+        private static void InitializeConfig()
+        {
+            try
+            {
+                // Set default values
+                _logFolderPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
+                _outputToConsole = true;
+                _outputToFile = true;
+                _monitorIntervalSeconds = 60;
+                _processCount = 10;
+                
+                // Try to read values from app.config
+                var appSettings = ConfigurationManager.AppSettings;
+                
+                if (appSettings["LogFolderPath"] != null)
+                    _logFolderPath = appSettings["LogFolderPath"];
+                
+                if (appSettings["OutputToConsole"] != null)
+                    _outputToConsole = Convert.ToBoolean(appSettings["OutputToConsole"]);
+                
+                if (appSettings["OutputToFile"] != null)
+                    _outputToFile = Convert.ToBoolean(appSettings["OutputToFile"]);
+                
+                if (appSettings["MonitorIntervalSeconds"] != null)
+                    _monitorIntervalSeconds = Convert.ToInt32(appSettings["MonitorIntervalSeconds"]);
+                
+                if (appSettings["ProcessCount"] != null)
+                    _processCount = Convert.ToInt32(appSettings["ProcessCount"]);
+                
+                // Ensure log directory exists if we're outputting to file
+                if (_outputToFile && !Directory.Exists(_logFolderPath))
+                    Directory.CreateDirectory(_logFolderPath);
+            }
+            catch (Exception ex)
+            {
+                // If there's an error reading config, use default values and log the error
+                Console.WriteLine($"Error reading configuration: {ex.Message}. Using default values.");
+            }
+        }
+        
+        /// <summary>
+        /// Collect resource usage information for all accessible processes
+        /// </summary>
+        /// <returns>List of process resource information</returns>
+        private static List<ProcessResourceInfo> CollectProcessResourceInfo()
+        {
+            var processResources = new List<ProcessResourceInfo>();
+            var processes = Process.GetProcesses();
+            
+            // Iterate through all processes
+            foreach (var process in processes)
+            {
+                try
+                {
+                    // Get CPU usage (this requires measuring over a time interval)
+                    var cpuUsage = GetProcessCpuUsage(process);
+                    
+                    // Get memory usage in MB
+                    var memoryUsageMB = process.WorkingSet64 / 1024.0 / 1024.0;
+                    
+                    // Get process start time (if accessible)
+                    string startTime = "N/A";
+                    try
+                    {
+                        startTime = process.StartTime.ToString("yyyy-MM-dd HH:mm");
+                    }
+                    catch
+                    {
+                        // Some processes may not allow access to their start time
+                    }
+                    
+                    // Add process information to the list
+                    processResources.Add(new ProcessResourceInfo
+                    {
+                        ProcessName = process.ProcessName,
+                        ProcessId = process.Id,
+                        CpuUsage = cpuUsage,
+                        MemoryUsageMB = memoryUsageMB,
+                        StartTime = startTime
+                    });
+                }
+                catch (Exception)
+                {
+                    // Skip processes that can't be accessed due to permissions
+                    continue;
+                }
+                finally
+                {
+                    // Dispose process object to free resources
+                    process.Dispose();
+                }
+            }
+            
+            return processResources;
+        }
+        
+        /// <summary>
+        /// Calculate CPU usage percentage for a specific process
+        /// </summary>
+        /// <param name="process">Process to measure</param>
+        /// <returns>CPU usage as a percentage</returns>
+        private static double GetProcessCpuUsage(Process process)
+        {
+            try
+            {
+                // Get initial CPU time and timestamp
+                var startTime = DateTime.UtcNow;
+                var startCpuUsage = process.TotalProcessorTime;
+                
+                // Wait briefly to measure CPU usage
+                Thread.Sleep(100); // Shortened for more responsive monitoring
+                
+                // Get end CPU time and timestamp
+                var endTime = DateTime.UtcNow;
+                var endCpuUsage = process.TotalProcessorTime;
+                
+                // Calculate CPU usage percentage
+                var cpuUsedMs = (endCpuUsage - startCpuUsage).TotalMilliseconds;
+                var totalMsPassed = (endTime - startTime).TotalMilliseconds;
+                
+                // Adjust for number of CPU cores
+                var cpuUsageTotal = cpuUsedMs / (Environment.ProcessorCount * totalMsPassed) * 100;
+                
+                return cpuUsageTotal;
+            }
+            catch
+            {
+                // Return 0 if there was an error calculating CPU usage
+                return 0;
+            }
+        }
+        
+        /// <summary>
+        /// Output report to console and/or file according to configuration
+        /// </summary>
+        /// <param name="report">Report content</param>
+        /// <param name="timestamp">Timestamp for the report</param>
+        private static void OutputReport(string report, DateTime timestamp)
+        {
+            // Output to console if configured
+            if (_outputToConsole)
+            {
+                Console.WriteLine(report);
+            }
+            
+            // Output to file if configured
+            if (_outputToFile)
+            {
+                try
+                {
+                    // Create log file name based on current date
+                    string logFileName = $"ProcessMonitor_{timestamp.ToString("yyyy-MM-dd")}.log";
+                    string logFilePath = Path.Combine(_logFolderPath, logFileName);
+                    
+                    // Append report to log file
+                    File.AppendAllText(logFilePath, report + Environment.NewLine);
+                }
+                catch (Exception ex)
+                {
+                    // Log error if file output fails
+                    Console.WriteLine($"Error writing to log file: {ex.Message}");
+                }
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Class to store process resource usage information
+    /// </summary>
+    class ProcessResourceInfo
+    {
+        /// <summary>Name of the process</summary>
+        public string ProcessName { get; set; }
+        
+        /// <summary>Process ID</summary>
+        public int ProcessId { get; set; }
+        
+        /// <summary>CPU usage as percentage</summary>
+        public double CpuUsage { get; set; }
+        
+        /// <summary>Memory usage in megabytes</summary>
+        public double MemoryUsageMB { get; set; }
+        
+        /// <summary>Process start time</summary>
+        public string StartTime { get; set; }
+    }
+}
