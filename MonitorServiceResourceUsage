@@ -1,6 +1,6 @@
-可以的，我們可以擴展工具來顯示進程的詳細描述和服務全名，類似於工作管理員。我將更新代碼來獲取和顯示這些信息。
+了解，如果 System.Management 不可用，我們可以使用其他方法收集進程描述和服務信息。讓我們使用 Windows API 和標準 .NET 類庫來實現這些功能。
 
-### 1. 首先更新 ProcessResourceInfo.cs 添加描述和服務名稱
+### 1. 更新 ProcessResourceInfo.cs (保持不變)
 
 ```csharp
 namespace ProcessMonitor
@@ -37,7 +37,7 @@ namespace ProcessMonitor
 }
 ```
 
-### 2. 更新 ProcessCollector.cs 以獲取進程描述和服務信息
+### 2. 更新 ProcessCollector.cs (不使用 ManagementObject)
 
 ```csharp
 using System;
@@ -47,10 +47,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
-using System.Management;
-using System.ServiceProcess;
 using System.IO;
 using Microsoft.Win32;
+using System.ComponentModel;
+using System.Text;
 
 namespace ProcessMonitor
 {
@@ -64,6 +64,7 @@ namespace ProcessMonitor
         private Dictionary<int, string> _processDescriptions = new Dictionary<int, string>();
         private Dictionary<int, string> _processServices = new Dictionary<int, string>();
         
+        // Win32 API for memory status
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
         private class MEMORYSTATUSEX
         {
@@ -86,6 +87,63 @@ namespace ProcessMonitor
         [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GlobalMemoryStatusEx([In, Out] MEMORYSTATUSEX lpBuffer);
+        
+        // Win32 API for services querying
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SERVICE_STATUS_PROCESS
+        {
+            public int dwServiceType;
+            public int dwCurrentState;
+            public int dwControlsAccepted;
+            public int dwWin32ExitCode;
+            public int dwServiceSpecificExitCode;
+            public int dwCheckPoint;
+            public int dwWaitHint;
+            public int dwProcessId;
+            public int dwServiceFlags;
+        }
+        
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr OpenSCManager(string lpMachineName, string lpDatabaseName, int dwDesiredAccess);
+        
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr OpenService(IntPtr hSCManager, string lpServiceName, int dwDesiredAccess);
+        
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool QueryServiceStatusEx(IntPtr hService, int infoLevel, IntPtr lpBuffer, int cbBufSize, out int pcbBytesNeeded);
+        
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool CloseServiceHandle(IntPtr hSCObject);
+        
+        [DllImport("advapi32.dll", EntryPoint = "EnumServicesStatusExW", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool EnumServicesStatusEx(
+            IntPtr hSCManager,
+            int infoLevel,
+            int dwServiceType,
+            int dwServiceState,
+            IntPtr lpServices,
+            int cbBufSize,
+            out int pcbBytesNeeded,
+            out int lpServicesReturned,
+            ref int lpResumeHandle,
+            string pszGroupName);
+            
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct ENUM_SERVICE_STATUS_PROCESS
+        {
+            public string lpServiceName;
+            public string lpDisplayName;
+            public SERVICE_STATUS_PROCESS ServiceStatusProcess;
+        }
+        
+        // Constants for service API
+        private const int SC_MANAGER_CONNECT = 0x0001;
+        private const int SC_MANAGER_ENUMERATE_SERVICE = 0x0004;
+        private const int SERVICE_QUERY_STATUS = 0x0004;
+        private const int SERVICE_WIN32 = 0x00000030;
+        private const int SERVICE_ACTIVE = 0x00000001;
+        private const int SC_STATUS_PROCESS_INFO = 0;
+        private const int SC_ENUM_PROCESS_INFO = 0;
         
         public ProcessCollector()
         {
@@ -125,43 +183,25 @@ namespace ProcessMonitor
         }
         
         /// <summary>
-        /// Loads process descriptions from file info and WMI
+        /// Loads process descriptions from file information
         /// </summary>
         private void LoadProcessDescriptions()
         {
             try
             {
-                // Try to get process descriptions from WMI
-                using (var searcher = new ManagementObjectSearcher("SELECT ProcessId, Description FROM Win32_Process"))
-                {
-                    foreach (ManagementObject process in searcher.Get())
-                    {
-                        try
-                        {
-                            int pid = Convert.ToInt32(process["ProcessId"]);
-                            string description = process["Description"]?.ToString() ?? "";
-                            
-                            if (!string.IsNullOrEmpty(description))
-                            {
-                                _processDescriptions[pid] = description;
-                            }
-                        }
-                        catch { }
-                    }
-                }
-                
-                // Enhance with file descriptions for running processes
                 foreach (var process in Process.GetProcesses())
                 {
                     try
                     {
-                        if (!_processDescriptions.ContainsKey(process.Id) || string.IsNullOrEmpty(_processDescriptions[process.Id]))
+                        string description = GetFileDescription(process);
+                        if (!string.IsNullOrEmpty(description))
                         {
-                            string description = GetFileDescription(process);
-                            if (!string.IsNullOrEmpty(description))
-                            {
-                                _processDescriptions[process.Id] = description;
-                            }
+                            _processDescriptions[process.Id] = description;
+                        }
+                        else
+                        {
+                            // If no description is found, use the process name
+                            _processDescriptions[process.Id] = process.ProcessName;
                         }
                     }
                     catch { }
@@ -184,93 +224,149 @@ namespace ProcessMonitor
         {
             try
             {
-                string filename = process.MainModule?.FileName;
+                string filename = null;
+                try
+                {
+                    filename = process.MainModule?.FileName;
+                }
+                catch
+                {
+                    // Some processes won't allow access to their modules
+                    return process.ProcessName;
+                }
+                
                 if (string.IsNullOrEmpty(filename))
-                    return string.Empty;
+                    return process.ProcessName;
                 
                 // Get file description from version info
                 FileVersionInfo versionInfo = FileVersionInfo.GetVersionInfo(filename);
+                
                 if (!string.IsNullOrEmpty(versionInfo.FileDescription))
                     return versionInfo.FileDescription;
                 
+                // If no description, return the filename
                 return Path.GetFileName(filename);
             }
             catch
             {
-                return string.Empty;
+                return process.ProcessName;
             }
         }
         
         /// <summary>
-        /// Loads the mapping between services and their processes
+        /// Loads the mapping between services and their processes using Windows API
         /// </summary>
         private void LoadServiceProcesses()
         {
+            var servicesToPID = new Dictionary<string, int>(); // service name to PID
+            var serviceDisplayNames = new Dictionary<string, string>(); // service name to display name
+            
             try
             {
-                // Get all services
-                ServiceController[] services = ServiceController.GetServices();
-                
-                // For each service, get the associated process ID
-                foreach (var service in services)
+                // Open the service control manager
+                IntPtr scmHandle = OpenSCManager(null, null, SC_MANAGER_CONNECT | SC_MANAGER_ENUMERATE_SERVICE);
+                if (scmHandle == IntPtr.Zero)
                 {
+                    int error = Marshal.GetLastWin32Error();
+                    Console.WriteLine($"Failed to open service manager: {new Win32Exception(error).Message}");
+                    return;
+                }
+                
+                try
+                {
+                    // First call to get required buffer size
+                    int bytesNeeded = 0;
+                    int servicesReturned = 0;
+                    int resumeHandle = 0;
+                    
+                    EnumServicesStatusEx(
+                        scmHandle,
+                        SC_ENUM_PROCESS_INFO,
+                        SERVICE_WIN32,
+                        SERVICE_ACTIVE,
+                        IntPtr.Zero,
+                        0,
+                        out bytesNeeded,
+                        out servicesReturned,
+                        ref resumeHandle,
+                        null);
+                    
+                    if (bytesNeeded == 0)
+                    {
+                        Console.WriteLine("No services found or buffer size estimation failed.");
+                        return;
+                    }
+                    
+                    // Allocate the buffer and call again
+                    IntPtr servicesBuffer = Marshal.AllocHGlobal(bytesNeeded);
+                    
                     try
                     {
-                        // Try to get the process ID for this service
-                        if (service.Status != ServiceControllerStatus.Stopped)
+                        resumeHandle = 0;
+                        
+                        if (EnumServicesStatusEx(
+                            scmHandle,
+                            SC_ENUM_PROCESS_INFO,
+                            SERVICE_WIN32,
+                            SERVICE_ACTIVE,
+                            servicesBuffer,
+                            bytesNeeded,
+                            out bytesNeeded,
+                            out servicesReturned,
+                            ref resumeHandle,
+                            null))
                         {
-                            int processId = GetServiceProcessId(service.ServiceName);
-                            if (processId > 0)
+                            // Marshal the buffer to the structure array
+                            int structSize = Marshal.SizeOf(typeof(ENUM_SERVICE_STATUS_PROCESS));
+                            
+                            for (int i = 0; i < servicesReturned; i++)
                             {
-                                string serviceName = service.DisplayName;
-                                if (string.IsNullOrEmpty(serviceName))
-                                    serviceName = service.ServiceName;
+                                IntPtr structPtr = new IntPtr(servicesBuffer.ToInt64() + i * structSize);
+                                ENUM_SERVICE_STATUS_PROCESS serviceStatus = (ENUM_SERVICE_STATUS_PROCESS)Marshal.PtrToStructure(structPtr, typeof(ENUM_SERVICE_STATUS_PROCESS));
                                 
-                                // Add or append to the service name for this process
-                                if (_processServices.ContainsKey(processId))
+                                // Store the service-to-PID mapping
+                                if (serviceStatus.ServiceStatusProcess.dwProcessId > 0)
                                 {
-                                    if (!_processServices[processId].Contains(serviceName))
-                                        _processServices[processId] += ", " + serviceName;
-                                }
-                                else
-                                {
-                                    _processServices[processId] = serviceName;
+                                    servicesToPID[serviceStatus.lpServiceName] = serviceStatus.ServiceStatusProcess.dwProcessId;
+                                    serviceDisplayNames[serviceStatus.lpServiceName] = serviceStatus.lpDisplayName;
                                 }
                             }
                         }
                     }
-                    catch { }
                     finally
                     {
-                        service.Dispose();
+                        Marshal.FreeHGlobal(servicesBuffer);
                     }
                 }
+                finally
+                {
+                    CloseServiceHandle(scmHandle);
+                }
+                
+                // Now invert the mapping to create PID-to-ServiceName dictionary
+                foreach (var pair in servicesToPID)
+                {
+                    string serviceName = pair.Key;
+                    int pid = pair.Value;
+                    string displayName = serviceDisplayNames.ContainsKey(serviceName) ? serviceDisplayNames[serviceName] : serviceName;
+                    
+                    if (_processServices.ContainsKey(pid))
+                    {
+                        if (!_processServices[pid].Contains(displayName))
+                            _processServices[pid] += ", " + displayName;
+                    }
+                    else
+                    {
+                        _processServices[pid] = displayName;
+                    }
+                }
+                
+                Console.WriteLine($"Loaded service information for {servicesToPID.Count} services");
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Warning: Could not load service information: {ex.Message}");
             }
-        }
-        
-        /// <summary>
-        /// Gets the process ID for a service using WMI
-        /// </summary>
-        private int GetServiceProcessId(string serviceName)
-        {
-            try
-            {
-                using (var searcher = new ManagementObjectSearcher(
-                    $"SELECT ProcessId FROM Win32_Service WHERE Name = '{serviceName}'"))
-                {
-                    foreach (ManagementObject service in searcher.Get())
-                    {
-                        return Convert.ToInt32(service["ProcessId"]);
-                    }
-                }
-            }
-            catch { }
-            
-            return 0;
         }
         
         /// <summary>
@@ -361,10 +457,9 @@ namespace ProcessMonitor
             return results.Where(p => p != null).ToList();
         }
         
-        // CPU usage measurement methods (Keep these as they were)
+        // CPU usage measurement methods remain the same
         private double GetProcessCpuUsageQuick(Process process)
         {
-            // Same as before...
             try
             {
                 // Get the current processor time
@@ -398,7 +493,6 @@ namespace ProcessMonitor
         
         private async Task<double> GetProcessCpuUsageDetailedAsync(Process process, CancellationToken cancellationToken)
         {
-            // Same as before...
             try
             {
                 // Get initial CPU time and timestamp
@@ -431,7 +525,32 @@ namespace ProcessMonitor
 }
 ```
 
-### 3. 更新 MonitoringEngine.cs 以顯示描述和服務名稱
+### 3. 更新 csproj 檔案 (移除 System.Management 和 System.ServiceProcess 引用)
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net6.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Configuration" Version="6.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="6.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="6.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>
+```
+
+### 4. MonitoringEngine.cs (保持與前面版本相同)
 
 ```csharp
 using System;
@@ -613,254 +732,38 @@ namespace ProcessMonitor
 }
 ```
 
-### 4. 更新 ConfigurationManager.cs 以添加詳細進程信息的配置選項
+### 5. ConfigurationManager.cs 和 appsettings.json (與前面提供的保持相同)
 
-```csharp
-using System;
-using System.Collections.Generic;
-using System.IO;
-using Microsoft.Extensions.Configuration;
+### 變更說明
 
-namespace ProcessMonitor
-{
-    /// <summary>
-    /// Manages application configuration settings from appsettings.json
-    /// </summary>
-    public static class ConfigurationManager
-    {
-        private static IConfiguration _configuration;
-        
-        // Configuration settings
-        public static string LogFolderPath { get; private set; }
-        public static bool OutputToConsole { get; private set; }
-        public static bool OutputToFile { get; private set; }
-        public static int MonitorIntervalSeconds { get; private set; }
-        public static int ProcessCount { get; private set; }
-        public static bool DetailedCpuMeasurement { get; private set; }
-        public static bool ShowMemoryRanking { get; private set; }
-        public static bool ShowDetailedProcessInfo { get; private set; }
+1. **移除系統管理和服務進程管理依賴**
+   - 刪除 System.Management 和 System.ServiceProcess.ServiceController 依賴
+   - 改用直接的 Win32 API 調用來獲取服務信息
 
-        /// <summary>
-        /// Initialize configuration settings from appsettings.json
-        /// </summary>
-        public static void Initialize()
-        {
-            try
-            {
-                // Build configuration from appsettings.json
-                _configuration = new ConfigurationBuilder()
-                    .SetBasePath(Directory.GetCurrentDirectory())
-                    .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
-                    .Build();
-                
-                // Get "ProcessMonitorSettings" section
-                var settings = _configuration.GetSection("ProcessMonitorSettings");
-                
-                // Read config values with defaults
-                LogFolderPath = settings["LogFolderPath"] ?? 
-                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
-                    
-                OutputToConsole = settings.GetValue<bool?>("OutputToConsole") ?? true;
-                OutputToFile = settings.GetValue<bool?>("OutputToFile") ?? true;
-                MonitorIntervalSeconds = settings.GetValue<int?>("MonitorIntervalSeconds") ?? 60;
-                ProcessCount = settings.GetValue<int?>("ProcessCount") ?? 10;
-                DetailedCpuMeasurement = settings.GetValue<bool?>("DetailedCpuMeasurement") ?? true;
-                ShowMemoryRanking = settings.GetValue<bool?>("ShowMemoryRanking") ?? true;
-                ShowDetailedProcessInfo = settings.GetValue<bool?>("ShowDetailedProcessInfo") ?? true;
-                
-                // Ensure log directory exists if we're outputting to file
-                if (OutputToFile && !Directory.Exists(LogFolderPath))
-                    Directory.CreateDirectory(LogFolderPath);
-            }
-            catch (Exception ex)
-            {
-                // If there's an error reading config, use default values and log the error
-                Console.WriteLine($"Error reading configuration: {ex.Message}. Using default values.");
-                
-                // Set default values
-                LogFolderPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
-                OutputToConsole = true;
-                OutputToFile = true;
-                MonitorIntervalSeconds = 60;
-                ProcessCount = 10;
-                DetailedCpuMeasurement = true;
-                ShowMemoryRanking = true;
-                ShowDetailedProcessInfo = true;
-                
-                // Create logs directory with default values
-                try
-                {
-                    if (OutputToFile && !Directory.Exists(LogFolderPath))
-                        Directory.CreateDirectory(LogFolderPath);
-                }
-                catch { }
-            }
-        }
-        
-        /// <summary>
-        /// Gets the raw configuration object for advanced usage
-        /// </summary>
-        public static IConfiguration GetRawConfiguration()
-        {
-            return _configuration;
-        }
-    }
-}
-```
+2. **使用 Win32 API 獲取服務信息**
+   - 使用 AdvApi32.dll 中的函數直接查詢 Windows 服務控制管理器
+   - 實現了自定義的服務枚舉功能，以映射服務到進程 ID
 
-### 5. 更新 appsettings.json 添加新的配置選項
+3. **改進進程描述獲取方法**
+   - 使用 FileVersionInfo 從進程的可執行文件中獲取描述信息
+   - 加入更多錯誤處理，避免因權限問題導致崩潰
 
-```json
-{
-  "ProcessMonitorSettings": {
-    "LogFolderPath": "C:\\ProcessMonitorLogs",
-    "OutputToConsole": true,
-    "OutputToFile": true,
-    "MonitorIntervalSeconds": 60,
-    "ProcessCount": 10,
-    "DetailedCpuMeasurement": true,
-    "ShowMemoryRanking": true,
-    "ShowDetailedProcessInfo": true
-  },
-  "Logging": {
-    "LogLevel": {
-      "Default": "Information",
-      "Microsoft": "Warning",
-      "System": "Warning"
-    }
-  }
-}
-```
-
-### 6. 更新 csproj 添加 System.Management 和 System.ServiceProcess 引用
-
-```xml
-<Project Sdk="Microsoft.NET.Sdk">
-
-  <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <TargetFramework>net6.0</TargetFramework>
-  </PropertyGroup>
-
-  <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Configuration" Version="6.0.0" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="6.0.0" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="6.0.0" />
-    <PackageReference Include="System.Management" Version="6.0.0" />
-    <PackageReference Include="System.ServiceProcess.ServiceController" Version="6.0.0" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <None Update="appsettings.json">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-  </ItemGroup>
-
-</Project>
-```
-
-### 7. 更新 Program.cs 以顯示新的配置設置
-
-```csharp
-using System;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace ProcessMonitor
-{
-    class Program
-    {
-        private static CancellationTokenSource _cancellationTokenSource;
-
-        static async Task Main(string[] args)
-        {
-            try
-            {
-                // Initialize application configuration from appsettings.json
-                ConfigurationManager.Initialize();
-                
-                // Create cancellation token source for graceful shutdown
-                _cancellationTokenSource = new CancellationTokenSource();
-
-                // Handle Ctrl+C to gracefully exit
-                Console.CancelKeyPress += (sender, e) => {
-                    e.Cancel = true;
-                    _cancellationTokenSource.Cancel();
-                    Console.WriteLine("Shutting down...");
-                };
-                
-                // Display startup message
-                DisplayStartupInfo();
-                
-                // Main monitoring loop
-                MonitoringEngine monitor = new MonitoringEngine();
-                await monitor.StartMonitoringAsync(_cancellationTokenSource.Token);
-                
-                Console.WriteLine("Process monitor has been shut down.");
-            }
-            catch (Exception ex)
-            {
-                // Handle any unhandled exceptions
-                Console.WriteLine($"Fatal error: {ex.Message}");
-                Console.WriteLine($"Stack trace: {ex.StackTrace}");
-                Console.WriteLine("Press any key to exit...");
-                Console.ReadKey();
-            }
-        }
-        
-        private static void DisplayStartupInfo()
-        {
-            Console.WriteLine("Process Resource Monitor Started...");
-            Console.WriteLine($"Time: {DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")}");
-            Console.WriteLine($"Monitoring top {ConfigurationManager.ProcessCount} processes every {ConfigurationManager.MonitorIntervalSeconds} seconds");
-            Console.WriteLine($"Output to console: {ConfigurationManager.OutputToConsole}");
-            Console.WriteLine($"Output to file: {ConfigurationManager.OutputToFile}");
-            if (ConfigurationManager.OutputToFile)
-                Console.WriteLine($"Log folder: {ConfigurationManager.LogFolderPath}");
-            Console.WriteLine($"Detailed CPU measurement: {ConfigurationManager.DetailedCpuMeasurement}");
-            Console.WriteLine($"Show memory ranking: {ConfigurationManager.ShowMemoryRanking}");
-            Console.WriteLine($"Show detailed process info: {ConfigurationManager.ShowDetailedProcessInfo}");
-            Console.WriteLine("Note: Non-administrator privileges may limit access to system processes\n");
-        }
-    }
-}
-```
-
-### 功能說明
-
-這個更新版本添加了以下功能：
-
-1. **進程描述（Description）**
-   - 使用 WMI (Windows Management Instrumentation) 獲取進程的描述
-   - 如果 WMI 沒有提供描述，嘗試從檔案版本信息獲取
-   - 在報告中顯示每個進程的描述
-
-2. **服務名稱（ServiceName）**
-   - 使用 ServiceController 和 WMI 獲取每個進程關聯的 Windows 服務
-   - 如果一個進程關聯多個服務，將它們組合在一起
-   - 在報告中顯示每個進程的服務名稱（如果有）
-
-3. **可配置的詳細信息顯示**
-   - 添加了 `ShowDetailedProcessInfo` 配置選項，可在 appsettings.json 中設置
-   - 當啟用時，報告將包含進程描述和服務名稱
-   - 當禁用時，維持原來簡潔的格式
-
-4. **改進的輸出格式**
-   - 為長描述添加了截斷功能，確保報告格式整齊
-   - 服務信息顯示在單獨的行，並進行縮進以提高可讀性
+4. **簡化結構和內存管理**
+   - 使用 Marshal 類手動管理與 Win32 API 交互時的非託管內存
+   - 在完成後釋放資源，確保不會發生內存洩漏
 
 ### 注意事項
 
-1. **依賴項**
-   - System.Management：用於 WMI 查詢
-   - System.ServiceProcess.ServiceController：用於服務信息
+1. **權限需求**
+   - 獲取服務信息仍然可能需要管理員權限
+   - 代碼已添加錯誤處理，即使沒有足夠權限也不會崩潰
 
-2. **權限要求**
-   - 獲取某些進程的詳細信息可能需要管理員權限
-   - 程序會優雅地處理不可訪問的進程
+2. **性能考慮**
+   - 直接使用 Win32 API 可能比使用高層次的 .NET 庫略微更高效
+   - 但初始化仍然需要一些時間，特別是在有大量服務的系統上
 
-3. **性能考慮**
-   - 在啟動時預加載進程描述和服務信息，避免每次報告時重新查詢
-   - 對於大量進程的系統，初始載入可能會稍微延長啟動時間
+3. **服務名稱格式**
+   - 如果一個進程關聯多個服務，它們會以逗號分隔顯示
+   - 儘可能使用服務顯示名稱而非服務名稱，以提高可讀性
 
-這個功能讓你的進程監視器更像 Windows 任務管理器，提供更豐富的信息來幫助你識別和理解系統中運行的進程。
+這個版本避免使用 System.Management 和 System.ServiceProcess 依賴，而是使用 Win32 API 直接調用，更適合於沒有這些額外庫的環境。功能上它提供與前一個版本相同的進程描述和服務信息顯示。
