@@ -1,561 +1,6 @@
-CPU 使用率顯示為 0% 可能有幾個原因。讓我們改進 CPU 使用率計算方法，以確保能夠正確顯示進程的 CPU 使用情況。
+好的，我將實現以 CSV 格式輸出進程資訊的功能。讓我們新增一個 CSVReportManager 來處理這個功能。
 
-主要問題可能是：
-
-1. 當前的 CPU 使用率計算方法可能不適用於某些系統或環境
-2. 取樣間隔可能太短，無法捕獲有意義的變化
-3. 可能存在權限問題，無法正確獲取 CPU 計時資訊
-
-讓我們實現一個更可靠的解決方案：
-
-### 改進 ProcessCollector.cs 的 CPU 使用率計算
-
-```csharp
-using System;
-using System.Diagnostics;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Collections.Generic;
-using System.Runtime.InteropServices;
-using System.IO;
-using Microsoft.Win32;
-using System.ComponentModel;
-using System.Text;
-using System.Collections.Concurrent;
-
-namespace ProcessMonitor
-{
-    /// <summary>
-    /// Responsible for collecting process information
-    /// </summary>
-    public class ProcessCollector
-    {
-        // Store system memory information to avoid retrieving it for each process
-        private double _totalPhysicalMemoryMB;
-        private Dictionary<int, string> _processDescriptions = new Dictionary<int, string>();
-        private Dictionary<int, string> _processServices = new Dictionary<int, string>();
-        
-        // CPU usage tracking
-        private ConcurrentDictionary<int, ProcessCpuUsageTracker> _processTrackers = new ConcurrentDictionary<int, ProcessCpuUsageTracker>();
-        
-        // Win32 API for memory status
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
-        private class MEMORYSTATUSEX
-        {
-            public uint dwLength;
-            public uint dwMemoryLoad;
-            public ulong ullTotalPhys;
-            public ulong ullAvailPhys;
-            public ulong ullTotalPageFile;
-            public ulong ullAvailPageFile;
-            public ulong ullTotalVirtual;
-            public ulong ullAvailVirtual;
-            public ulong ullAvailExtendedVirtual;
-            
-            public MEMORYSTATUSEX()
-            {
-                dwLength = (uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX));
-            }
-        }
-        
-        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GlobalMemoryStatusEx([In, Out] MEMORYSTATUSEX lpBuffer);
-        
-        // Win32 API for getting system times
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool GetSystemTimes(out long idleTime, out long kernelTime, out long userTime);
-        
-        // Win32 API for services querying
-        [StructLayout(LayoutKind.Sequential)]
-        private struct SERVICE_STATUS_PROCESS
-        {
-            public int dwServiceType;
-            public int dwCurrentState;
-            public int dwControlsAccepted;
-            public int dwWin32ExitCode;
-            public int dwServiceSpecificExitCode;
-            public int dwCheckPoint;
-            public int dwWaitHint;
-            public int dwProcessId;
-            public int dwServiceFlags;
-        }
-        
-        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern IntPtr OpenSCManager(string lpMachineName, string lpDatabaseName, int dwDesiredAccess);
-        
-        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern IntPtr OpenService(IntPtr hSCManager, string lpServiceName, int dwDesiredAccess);
-        
-        [DllImport("advapi32.dll", SetLastError = true)]
-        private static extern bool QueryServiceStatusEx(IntPtr hService, int infoLevel, IntPtr lpBuffer, int cbBufSize, out int pcbBytesNeeded);
-        
-        [DllImport("advapi32.dll", SetLastError = true)]
-        private static extern bool CloseServiceHandle(IntPtr hSCObject);
-        
-        [DllImport("advapi32.dll", EntryPoint = "EnumServicesStatusExW", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern bool EnumServicesStatusEx(
-            IntPtr hSCManager,
-            int infoLevel,
-            int dwServiceType,
-            int dwServiceState,
-            IntPtr lpServices,
-            int cbBufSize,
-            out int pcbBytesNeeded,
-            out int lpServicesReturned,
-            ref int lpResumeHandle,
-            string pszGroupName);
-            
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        private struct ENUM_SERVICE_STATUS_PROCESS
-        {
-            public string lpServiceName;
-            public string lpDisplayName;
-            public SERVICE_STATUS_PROCESS ServiceStatusProcess;
-        }
-        
-        // Constants for service API
-        private const int SC_MANAGER_CONNECT = 0x0001;
-        private const int SC_MANAGER_ENUMERATE_SERVICE = 0x0004;
-        private const int SERVICE_QUERY_STATUS = 0x0004;
-        private const int SERVICE_WIN32 = 0x00000030;
-        private const int SERVICE_ACTIVE = 0x00000001;
-        private const int SC_STATUS_PROCESS_INFO = 0;
-        private const int SC_ENUM_PROCESS_INFO = 0;
-        
-        /// <summary>
-        /// Internal class to track CPU usage over time for a process
-        /// </summary>
-        private class ProcessCpuUsageTracker
-        {
-            private DateTime _lastUpdateTime;
-            private TimeSpan _lastTotalProcessorTime;
-            private double _cpuUsage;
-            private bool _isInitialized;
-            
-            public ProcessCpuUsageTracker()
-            {
-                _lastUpdateTime = DateTime.UtcNow;
-                _lastTotalProcessorTime = TimeSpan.Zero;
-                _cpuUsage = 0;
-                _isInitialized = false;
-            }
-            
-            public double UpdateCpuUsage(Process process)
-            {
-                try
-                {
-                    DateTime currentUpdateTime = DateTime.UtcNow;
-                    TimeSpan currentTotalProcessorTime = process.TotalProcessorTime;
-                    
-                    if (_isInitialized)
-                    {
-                        // Calculate CPU usage
-                        double elapsedSeconds = (currentUpdateTime - _lastUpdateTime).TotalSeconds;
-                        
-                        if (elapsedSeconds > 0)
-                        {
-                            double cpuUsedMs = (currentTotalProcessorTime - _lastTotalProcessorTime).TotalMilliseconds;
-                            // CPU usage % = (CPU time used in period) / (period length * processor count) * 100
-                            _cpuUsage = (cpuUsedMs / (elapsedSeconds * 1000 * Environment.ProcessorCount)) * 100;
-                            // Cap at 100% per core
-                            _cpuUsage = Math.Min(_cpuUsage, 100 * Environment.ProcessorCount);
-                        }
-                    }
-                    else
-                    {
-                        _isInitialized = true;
-                    }
-                    
-                    // Update previous values for next calculation
-                    _lastUpdateTime = currentUpdateTime;
-                    _lastTotalProcessorTime = currentTotalProcessorTime;
-                    
-                    return _cpuUsage;
-                }
-                catch
-                {
-                    // If we can't get the CPU time, return the last known value or 0
-                    return _isInitialized ? _cpuUsage : 0;
-                }
-            }
-        }
-        
-        public ProcessCollector()
-        {
-            // Initialize total system memory on creation
-            InitializeSystemInfo();
-            
-            // Pre-load process descriptions and service relationships
-            LoadProcessDescriptions();
-            LoadServiceProcesses();
-            
-            // Pre-initialize process trackers
-            InitializeProcessTrackers();
-        }
-        
-        /// <summary>
-        /// Initialize CPU usage trackers for all processes
-        /// </summary>
-        private void InitializeProcessTrackers()
-        {
-            try
-            {
-                foreach (var process in Process.GetProcesses())
-                {
-                    try
-                    {
-                        _processTrackers[process.Id] = new ProcessCpuUsageTracker();
-                    }
-                    catch { }
-                    finally
-                    {
-                        process.Dispose();
-                    }
-                }
-                
-                // Do an initial measurement to initialize values
-                foreach (var processId in _processTrackers.Keys.ToList())
-                {
-                    try
-                    {
-                        using (var process = Process.GetProcessById(processId))
-                        {
-                            _processTrackers[processId].UpdateCpuUsage(process);
-                        }
-                    }
-                    catch
-                    {
-                        // Process may no longer exist, remove tracker
-                        _processTrackers.TryRemove(processId, out _);
-                    }
-                }
-                
-                // Wait a moment to get a first real reading
-                Thread.Sleep(200);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Warning: Error initializing process trackers: {ex.Message}");
-            }
-        }
-        
-        private void InitializeSystemInfo()
-        {
-            try
-            {
-                // Get total physical memory using Windows API
-                var memoryStatus = new MEMORYSTATUSEX();
-                if (GlobalMemoryStatusEx(memoryStatus))
-                {
-                    _totalPhysicalMemoryMB = memoryStatus.ullTotalPhys / 1024.0 / 1024.0;
-                    Console.WriteLine($"Detected total physical memory: {_totalPhysicalMemoryMB:F2} MB");
-                }
-                else
-                {
-                    // If API call fails, use default value
-                    _totalPhysicalMemoryMB = 8192; // 8 GB default
-                    Console.WriteLine($"Could not detect physical memory. Using default: {_totalPhysicalMemoryMB:F2} MB");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error retrieving system memory information: {ex.Message}");
-                // Fallback to a reasonable value if we can't get the actual memory
-                _totalPhysicalMemoryMB = 8192; // 8 GB default
-                Console.WriteLine($"Using default memory value: {_totalPhysicalMemoryMB:F2} MB");
-            }
-        }
-        
-        /// <summary>
-        /// Loads process descriptions from file information
-        /// </summary>
-        private void LoadProcessDescriptions()
-        {
-            try
-            {
-                foreach (var process in Process.GetProcesses())
-                {
-                    try
-                    {
-                        string description = GetFileDescription(process);
-                        if (!string.IsNullOrEmpty(description))
-                        {
-                            _processDescriptions[process.Id] = description;
-                        }
-                        else
-                        {
-                            // If no description is found, use the process name
-                            _processDescriptions[process.Id] = process.ProcessName;
-                        }
-                    }
-                    catch { }
-                    finally
-                    {
-                        process.Dispose();
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Warning: Could not load process descriptions: {ex.Message}");
-            }
-        }
-        
-        /// <summary>
-        /// Gets file description for a process
-        /// </summary>
-        private string GetFileDescription(Process process)
-        {
-            try
-            {
-                string filename = null;
-                try
-                {
-                    filename = process.MainModule?.FileName;
-                }
-                catch
-                {
-                    // Some processes won't allow access to their modules
-                    return process.ProcessName;
-                }
-                
-                if (string.IsNullOrEmpty(filename))
-                    return process.ProcessName;
-                
-                // Get file description from version info
-                FileVersionInfo versionInfo = FileVersionInfo.GetVersionInfo(filename);
-                
-                if (!string.IsNullOrEmpty(versionInfo.FileDescription))
-                    return versionInfo.FileDescription;
-                
-                // If no description, return the filename
-                return Path.GetFileName(filename);
-            }
-            catch
-            {
-                return process.ProcessName;
-            }
-        }
-        
-        /// <summary>
-        /// Loads the mapping between services and their processes using Windows API
-        /// </summary>
-        private void LoadServiceProcesses()
-        {
-            var servicesToPID = new Dictionary<string, int>(); // service name to PID
-            var serviceDisplayNames = new Dictionary<string, string>(); // service name to display name
-            
-            try
-            {
-                // Open the service control manager
-                IntPtr scmHandle = OpenSCManager(null, null, SC_MANAGER_CONNECT | SC_MANAGER_ENUMERATE_SERVICE);
-                if (scmHandle == IntPtr.Zero)
-                {
-                    int error = Marshal.GetLastWin32Error();
-                    Console.WriteLine($"Failed to open service manager: {new Win32Exception(error).Message}");
-                    return;
-                }
-                
-                try
-                {
-                    // First call to get required buffer size
-                    int bytesNeeded = 0;
-                    int servicesReturned = 0;
-                    int resumeHandle = 0;
-                    
-                    EnumServicesStatusEx(
-                        scmHandle,
-                        SC_ENUM_PROCESS_INFO,
-                        SERVICE_WIN32,
-                        SERVICE_ACTIVE,
-                        IntPtr.Zero,
-                        0,
-                        out bytesNeeded,
-                        out servicesReturned,
-                        ref resumeHandle,
-                        null);
-                    
-                    if (bytesNeeded == 0)
-                    {
-                        Console.WriteLine("No services found or buffer size estimation failed.");
-                        return;
-                    }
-                    
-                    // Allocate the buffer and call again
-                    IntPtr servicesBuffer = Marshal.AllocHGlobal(bytesNeeded);
-                    
-                    try
-                    {
-                        resumeHandle = 0;
-                        
-                        if (EnumServicesStatusEx(
-                            scmHandle,
-                            SC_ENUM_PROCESS_INFO,
-                            SERVICE_WIN32,
-                            SERVICE_ACTIVE,
-                            servicesBuffer,
-                            bytesNeeded,
-                            out bytesNeeded,
-                            out servicesReturned,
-                            ref resumeHandle,
-                            null))
-                        {
-                            // Marshal the buffer to the structure array
-                            int structSize = Marshal.SizeOf(typeof(ENUM_SERVICE_STATUS_PROCESS));
-                            
-                            for (int i = 0; i < servicesReturned; i++)
-                            {
-                                IntPtr structPtr = new IntPtr(servicesBuffer.ToInt64() + i * structSize);
-                                ENUM_SERVICE_STATUS_PROCESS serviceStatus = (ENUM_SERVICE_STATUS_PROCESS)Marshal.PtrToStructure(structPtr, typeof(ENUM_SERVICE_STATUS_PROCESS));
-                                
-                                // Store the service-to-PID mapping
-                                if (serviceStatus.ServiceStatusProcess.dwProcessId > 0)
-                                {
-                                    servicesToPID[serviceStatus.lpServiceName] = serviceStatus.ServiceStatusProcess.dwProcessId;
-                                    serviceDisplayNames[serviceStatus.lpServiceName] = serviceStatus.lpDisplayName;
-                                }
-                            }
-                        }
-                    }
-                    finally
-                    {
-                        Marshal.FreeHGlobal(servicesBuffer);
-                    }
-                }
-                finally
-                {
-                    CloseServiceHandle(scmHandle);
-                }
-                
-                // Now invert the mapping to create PID-to-ServiceName dictionary
-                foreach (var pair in servicesToPID)
-                {
-                    string serviceName = pair.Key;
-                    int pid = pair.Value;
-                    string displayName = serviceDisplayNames.ContainsKey(serviceName) ? serviceDisplayNames[serviceName] : serviceName;
-                    
-                    if (_processServices.ContainsKey(pid))
-                    {
-                        if (!_processServices[pid].Contains(displayName))
-                            _processServices[pid] += ", " + displayName;
-                    }
-                    else
-                    {
-                        _processServices[pid] = displayName;
-                    }
-                }
-                
-                Console.WriteLine($"Loaded service information for {servicesToPID.Count} services");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Warning: Could not load service information: {ex.Message}");
-            }
-        }
-        
-        /// <summary>
-        /// Asynchronously collect resource usage information for all accessible processes
-        /// </summary>
-        /// <returns>List of process resource information</returns>
-        public async Task<List<ProcessResourceInfo>> CollectProcessResourceInfoAsync(CancellationToken cancellationToken)
-        {
-            var processResources = new List<ProcessResourceInfo>();
-            var processes = Process.GetProcesses();
-            
-            // Create tasks for all processes
-            var tasks = processes.Select(async process => 
-            {
-                try
-                {
-                    // Get CPU usage using our persistent tracker
-                    double cpuUsage = GetCpuUsage(process);
-                    
-                    // Get memory usage in MB
-                    var memoryUsageMB = process.WorkingSet64 / 1024.0 / 1024.0;
-                    
-                    // Calculate memory usage percentage
-                    var memoryUsagePercent = (_totalPhysicalMemoryMB > 0) 
-                        ? (memoryUsageMB / _totalPhysicalMemoryMB) * 100 
-                        : 0;
-                    
-                    // Get process start time (if accessible)
-                    string startTime = "N/A";
-                    try
-                    {
-                        startTime = process.StartTime.ToString("yyyy-MM-dd HH:mm");
-                    }
-                    catch
-                    {
-                        // Some processes may not allow access to their start time
-                    }
-                    
-                    // Get process description
-                    string description = "N/A";
-                    if (_processDescriptions.ContainsKey(process.Id))
-                        description = _processDescriptions[process.Id];
-                    
-                    // Get service name
-                    string serviceName = string.Empty;
-                    if (_processServices.ContainsKey(process.Id))
-                        serviceName = _processServices[process.Id];
-                    
-                    // Return process information
-                    return new ProcessResourceInfo
-                    {
-                        ProcessName = process.ProcessName,
-                        ProcessId = process.Id,
-                        CpuUsage = cpuUsage,
-                        MemoryUsageMB = memoryUsageMB,
-                        MemoryUsagePercent = memoryUsagePercent,
-                        StartTime = startTime,
-                        Description = description,
-                        ServiceName = serviceName
-                    };
-                }
-                catch (Exception)
-                {
-                    // Skip processes that can't be accessed due to permissions
-                    return null;
-                }
-                finally
-                {
-                    // Dispose process object to free resources
-                    try { process.Dispose(); } catch { }
-                }
-            }).ToList();
-            
-            // Wait for all tasks to complete
-            var results = await Task.WhenAll(tasks);
-            
-            // Filter out null results and return
-            return results.Where(p => p != null).ToList();
-        }
-        
-        /// <summary>
-        /// Get CPU usage for a process using persistent trackers
-        /// </summary>
-        private double GetCpuUsage(Process process)
-        {
-            try
-            {
-                // Get or create the tracker for this process
-                var tracker = _processTrackers.GetOrAdd(process.Id, _ => new ProcessCpuUsageTracker());
-                
-                // Update and get the CPU usage
-                return tracker.UpdateCpuUsage(process);
-            }
-            catch
-            {
-                return 0;
-            }
-        }
-    }
-}
-```
-
-### 更新 ConfigurationManager.cs 添加重要的 CPU 相關設定
+### 1. 新增 ReportFormat 枚舉選項到 ConfigurationManager.cs
 
 ```csharp
 using System;
@@ -565,6 +10,15 @@ using Microsoft.Extensions.Configuration;
 
 namespace ProcessMonitor
 {
+    /// <summary>
+    /// Output report format options
+    /// </summary>
+    public enum ReportFormat
+    {
+        Text,
+        CSV
+    }
+    
     /// <summary>
     /// Manages application configuration settings from appsettings.json
     /// </summary>
@@ -583,6 +37,7 @@ namespace ProcessMonitor
         public static bool ShowDetailedProcessInfo { get; private set; }
         public static int LogRetentionDays { get; private set; }
         public static int CpuUpdateIntervalMs { get; private set; }
+        public static ReportFormat OutputFormat { get; private set; }
 
         /// <summary>
         /// Initialize configuration settings from appsettings.json
@@ -613,6 +68,18 @@ namespace ProcessMonitor
                 ShowDetailedProcessInfo = settings.GetValue<bool?>("ShowDetailedProcessInfo") ?? true;
                 LogRetentionDays = settings.GetValue<int?>("LogRetentionDays") ?? 15;
                 CpuUpdateIntervalMs = settings.GetValue<int?>("CpuUpdateIntervalMs") ?? 200;
+                
+                // Parse report format
+                string formatStr = settings["OutputFormat"] ?? "CSV";
+                if (Enum.TryParse<ReportFormat>(formatStr, true, out var format))
+                {
+                    OutputFormat = format;
+                }
+                else
+                {
+                    OutputFormat = ReportFormat.CSV; // Default to CSV if parsing fails
+                    Console.WriteLine($"Warning: Invalid OutputFormat '{formatStr}'. Using CSV format.");
+                }
                 
                 // Validate settings
                 if (LogRetentionDays < 1)
@@ -650,6 +117,7 @@ namespace ProcessMonitor
                 ShowDetailedProcessInfo = true;
                 LogRetentionDays = 15;
                 CpuUpdateIntervalMs = 200;
+                OutputFormat = ReportFormat.CSV;
                 
                 // Create logs directory with default values
                 try
@@ -678,7 +146,472 @@ namespace ProcessMonitor
 }
 ```
 
-### 更新 appsettings.json 添加 CPU 更新間隔設定
+### 2. 重寫 ReportManager.cs 來支援 CSV 報告格式
+
+```csharp
+using System;
+using System.IO;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Linq;
+using System.Collections.Generic;
+using System.Globalization;
+
+namespace ProcessMonitor
+{
+    /// <summary>
+    /// Responsible for handling output of monitoring reports
+    /// </summary>
+    public class ReportManager
+    {
+        // Keep track of when we last cleaned up old logs
+        private static DateTime _lastLogCleanupTime = DateTime.MinValue;
+        
+        /// <summary>
+        /// Output a monitoring report to configured destinations
+        /// </summary>
+        /// <param name="processResources">The list of process resources to output</param>
+        /// <param name="timestamp">Timestamp for the report</param>
+        /// <param name="cancellationToken">Cancellation token</param>
+        public async Task OutputReportAsync(List<ProcessResourceInfo> processResources, 
+                                           DateTime timestamp, 
+                                           CancellationToken cancellationToken)
+        {
+            // Create the appropriate report based on the configured format
+            string report;
+            string fileExtension;
+            
+            if (ConfigurationManager.OutputFormat == ReportFormat.CSV)
+            {
+                report = GenerateCSVReport(processResources, timestamp);
+                fileExtension = "csv";
+            }
+            else
+            {
+                report = GenerateTextReport(processResources, timestamp);
+                fileExtension = "log";
+            }
+            
+            if (ConfigurationManager.OutputToConsole)
+            {
+                OutputToConsole(report);
+            }
+            
+            if (ConfigurationManager.OutputToFile)
+            {
+                await OutputToFileAsync(report, timestamp, fileExtension, cancellationToken);
+                
+                // Clean up old log files once per day
+                if ((DateTime.Now - _lastLogCleanupTime).TotalHours >= 24)
+                {
+                    await CleanupOldLogsAsync(cancellationToken);
+                    _lastLogCleanupTime = DateTime.Now;
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Generates a CSV format report
+        /// </summary>
+        private string GenerateCSVReport(List<ProcessResourceInfo> processResources, DateTime timestamp)
+        {
+            StringBuilder csv = new StringBuilder();
+            
+            // Add timestamp row
+            csv.AppendLine($"Timestamp,{timestamp.ToString("yyyy-MM-dd HH:mm:ss")}");
+            csv.AppendLine($"Total Processes,{processResources.Count}");
+            csv.AppendLine($"Total Memory (MB),{processResources.Sum(p => p.MemoryUsageMB):F2}");
+            csv.AppendLine();
+            
+            // Add CSV headers
+            csv.AppendLine("Rank,Process Name,PID,CPU (%),Memory (MB),Memory (%),Start Time,Description,Service");
+            
+            // Sort by CPU usage and add top processes
+            var topCpuProcesses = processResources
+                .OrderByDescending(p => p.CpuUsage)
+                .Take(ConfigurationManager.ProcessCount)
+                .ToList();
+                
+            for (int i = 0; i < topCpuProcesses.Count; i++)
+            {
+                var proc = topCpuProcesses[i];
+                csv.AppendLine(FormatCSVRow(i + 1, proc));
+            }
+            
+            // Add a separator before memory section if enabled
+            if (ConfigurationManager.ShowMemoryRanking)
+            {
+                csv.AppendLine();
+                csv.AppendLine("Memory Ranking");
+                csv.AppendLine("Rank,Process Name,PID,CPU (%),Memory (MB),Memory (%),Start Time,Description,Service");
+                
+                // Sort by memory usage and add top processes
+                var topMemoryProcesses = processResources
+                    .OrderByDescending(p => p.MemoryUsageMB)
+                    .Take(ConfigurationManager.ProcessCount)
+                    .ToList();
+                    
+                for (int i = 0; i < topMemoryProcesses.Count; i++)
+                {
+                    var proc = topMemoryProcesses[i];
+                    csv.AppendLine(FormatCSVRow(i + 1, proc));
+                }
+            }
+            
+            return csv.ToString();
+        }
+        
+        /// <summary>
+        /// Format a process information row for CSV
+        /// </summary>
+        private string FormatCSVRow(int rank, ProcessResourceInfo proc)
+        {
+            // Properly escape CSV fields to handle commas and quotes
+            return $"{rank}," +
+                   $"{EscapeCSV(proc.ProcessName)}," +
+                   $"{proc.ProcessId}," +
+                   $"{proc.CpuUsage.ToString("F2", CultureInfo.InvariantCulture)}," +
+                   $"{proc.MemoryUsageMB.ToString("F2", CultureInfo.InvariantCulture)}," +
+                   $"{proc.MemoryUsagePercent.ToString("F2", CultureInfo.InvariantCulture)}," +
+                   $"{EscapeCSV(proc.StartTime)}," +
+                   $"{EscapeCSV(proc.Description)}," +
+                   $"{EscapeCSV(proc.ServiceName)}";
+        }
+        
+        /// <summary>
+        /// Escape a string for CSV format
+        /// </summary>
+        private string EscapeCSV(string field)
+        {
+            if (string.IsNullOrEmpty(field))
+                return string.Empty;
+                
+            // If the field contains a comma, newline, or quote, wrap it in quotes
+            if (field.Contains(",") || field.Contains("\"") || field.Contains("\r") || field.Contains("\n"))
+            {
+                // Replace any quotes with double quotes
+                field = field.Replace("\"", "\"\"");
+                
+                // Wrap the field in quotes
+                return $"\"{field}\"";
+            }
+            
+            return field;
+        }
+        
+        /// <summary>
+        /// Generates a text format report (original format)
+        /// </summary>
+        private string GenerateTextReport(List<ProcessResourceInfo> processResources, DateTime timestamp)
+        {
+            StringBuilder report = new StringBuilder();
+            
+            // Generate report heading
+            report.AppendLine($"===== Process Resource Monitor Report =====");
+            report.AppendLine($"Time: {timestamp.ToString("yyyy-MM-dd HH:mm:ss")}");
+            report.AppendLine();
+            
+            // Add system information to report
+            var totalMemory = processResources.Sum(p => p.MemoryUsageMB);
+            var processCount = processResources.Count;
+            
+            report.AppendLine($"Total processes monitored: {processCount}");
+            report.AppendLine($"Total memory usage: {totalMemory:F2} MB");
+            report.AppendLine();
+            
+            // Generate CPU usage ranking
+            GenerateResourceRanking(report, processResources, 
+                p => p.CpuUsage, "CPU", ConfigurationManager.ProcessCount);
+            
+            report.AppendLine();
+            
+            // Generate Memory usage ranking if enabled
+            if (ConfigurationManager.ShowMemoryRanking)
+            {
+                GenerateResourceRanking(report, processResources, 
+                    p => p.MemoryUsagePercent, "Memory", ConfigurationManager.ProcessCount);
+            }
+            
+            report.AppendLine();
+            report.AppendLine($"Next update will occur at: {DateTime.Now.AddSeconds(ConfigurationManager.MonitorIntervalSeconds).ToString("yyyy-MM-dd HH:mm:ss")}");
+            report.AppendLine(new string('=', 100));
+            
+            return report.ToString();
+        }
+        
+        /// <summary>
+        /// Generates a resource usage ranking table for the specified resource
+        /// </summary>
+        private void GenerateResourceRanking(StringBuilder report, List<ProcessResourceInfo> processes, 
+                                          Func<ProcessResourceInfo, double> resourceSelector, 
+                                          string resourceName, int count)
+        {
+            // Sort processes by the specified resource usage and take top N
+            var topProcesses = processes
+                .OrderByDescending(resourceSelector)
+                .Take(count)
+                .ToList();
+            
+            // Add header to report
+            report.AppendLine($"Top {count} processes by {resourceName} usage:");
+            
+            // Determine if we should show detailed info
+            if (ConfigurationManager.ShowDetailedProcessInfo)
+            {
+                report.AppendLine($"{"Rank".PadRight(5)}{"Process Name".PadRight(30)}{"PID".PadRight(10)}{$"{resourceName} (%)".PadRight(12)}{"Memory (MB)".PadRight(15)}{"Start Time".PadRight(20)}{"Description".PadRight(40)}");
+                report.AppendLine(new string('-', 132));
+                
+                // Add each process to report with ranking
+                for (int i = 0; i < topProcesses.Count; i++)
+                {
+                    var proc = topProcesses[i];
+                    double resourceValue = resourceSelector(proc);
+                    
+                    report.AppendLine($"{(i+1).ToString().PadRight(5)}" +
+                                    $"{proc.ProcessName.PadRight(30)}" +
+                                    $"{proc.ProcessId.ToString().PadRight(10)}" +
+                                    $"{resourceValue.ToString("F2").PadRight(12)}" +
+                                    $"{proc.MemoryUsageMB.ToString("F2").PadRight(15)}" +
+                                    $"{proc.StartTime.PadRight(20)}" +
+                                    $"{TruncateString(proc.Description, 40).PadRight(40)}");
+                    
+                    // If there's a service associated with this process, show it indented on the next line
+                    if (!string.IsNullOrEmpty(proc.ServiceName))
+                    {
+                        report.AppendLine($"     {"Service: " + proc.ServiceName}");
+                    }
+                }
+            }
+            else
+            {
+                // Original simplified display
+                report.AppendLine($"{"Rank".PadRight(5)}{"Process Name".PadRight(30)}{"PID".PadRight(10)}{$"{resourceName} (%)".PadRight(12)}{"Memory (MB)".PadRight(15)}{"Start Time".PadRight(20)}");
+                report.AppendLine(new string('-', 92));
+                
+                // Add each process to report with ranking
+                for (int i = 0; i < topProcesses.Count; i++)
+                {
+                    var proc = topProcesses[i];
+                    double resourceValue = resourceSelector(proc);
+                    
+                    report.AppendLine($"{(i+1).ToString().PadRight(5)}" +
+                                    $"{proc.ProcessName.PadRight(30)}" +
+                                    $"{proc.ProcessId.ToString().PadRight(10)}" +
+                                    $"{resourceValue.ToString("F2").PadRight(12)}" +
+                                    $"{proc.MemoryUsageMB.ToString("F2").PadRight(15)}" +
+                                    $"{proc.StartTime.PadRight(20)}");
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Truncates a string to a maximum length and adds ellipsis if needed
+        /// </summary>
+        private string TruncateString(string input, int maxLength)
+        {
+            if (string.IsNullOrEmpty(input))
+                return string.Empty;
+                
+            if (input.Length <= maxLength)
+                return input;
+                
+            return input.Substring(0, maxLength - 3) + "...";
+        }
+        
+        /// <summary>
+        /// Output the report to the console
+        /// </summary>
+        private void OutputToConsole(string reportText)
+        {
+            try
+            {
+                Console.Clear();
+                Console.WriteLine(reportText);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error writing to console: {ex.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// Output the report to a log file
+        /// </summary>
+        private async Task OutputToFileAsync(string reportText, DateTime timestamp, string extension, CancellationToken cancellationToken)
+        {
+            try
+            {
+                // Ensure log directory exists
+                if (!Directory.Exists(ConfigurationManager.LogFolderPath))
+                {
+                    try
+                    {
+                        Directory.CreateDirectory(ConfigurationManager.LogFolderPath);
+                        Console.WriteLine($"Created log directory: {ConfigurationManager.LogFolderPath}");
+                    }
+                    catch (Exception dirEx)
+                    {
+                        Console.WriteLine($"Failed to create log directory: {dirEx.Message}");
+                        return; // Cannot proceed without a log directory
+                    }
+                }
+                
+                // Create timestamped filename
+                string filename = $"ProcessMonitor_{timestamp.ToString("yyyy-MM-dd")}.{extension}";
+                string filePath = Path.Combine(ConfigurationManager.LogFolderPath, filename);
+                
+                // Write to the file
+                using (StreamWriter writer = new StreamWriter(filePath, true, Encoding.UTF8))
+                {
+                    await writer.WriteLineAsync(reportText);
+                    await writer.FlushAsync();
+                }
+                
+                Console.WriteLine($"Report saved to: {filePath}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error writing report to file: {ex.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// Clean up log files older than the retention period
+        /// </summary>
+        private async Task CleanupOldLogsAsync(CancellationToken cancellationToken)
+        {
+            try
+            {
+                // Calculate the cutoff date for log retention
+                DateTime cutoffDate = DateTime.Now.AddDays(-ConfigurationManager.LogRetentionDays);
+                
+                // Get all log files
+                DirectoryInfo logDir = new DirectoryInfo(ConfigurationManager.LogFolderPath);
+                if (!logDir.Exists)
+                    return;
+                
+                // Find files older than the cutoff date (both .log and .csv)
+                var oldFiles = logDir.GetFiles("ProcessMonitor_*.*")
+                    .Where(f => (f.Extension == ".log" || f.Extension == ".csv") && f.LastWriteTime < cutoffDate)
+                    .ToList();
+                
+                if (oldFiles.Count > 0)
+                {
+                    Console.WriteLine($"Cleaning up {oldFiles.Count} log files older than {ConfigurationManager.LogRetentionDays} days...");
+                    
+                    // Delete old files
+                    foreach (var file in oldFiles)
+                    {
+                        try
+                        {
+                            // Check for cancellation
+                            cancellationToken.ThrowIfCancellationRequested();
+                            
+                            // Delete the file
+                            file.Delete();
+                            
+                            // Pause briefly to avoid overwhelming the file system
+                            await Task.Delay(20, cancellationToken);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            throw; // Rethrow cancellation exception
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Failed to delete old log file {file.Name}: {ex.Message}");
+                        }
+                    }
+                    
+                    Console.WriteLine("Log cleanup completed.");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Just bubble up cancellation exceptions
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error during log cleanup: {ex.Message}");
+            }
+        }
+    }
+}
+```
+
+### 3. 更新 MonitoringEngine.cs 使用新的報告格式
+
+```csharp
+using System;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.Text;
+
+namespace ProcessMonitor
+{
+    /// <summary>
+    /// Main monitoring engine for processes
+    /// </summary>
+    public class MonitoringEngine
+    {
+        /// <summary>
+        /// Start the monitoring loop
+        /// </summary>
+        public async Task StartMonitoringAsync(CancellationToken cancellationToken)
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                // Get current timestamp for this monitoring cycle
+                DateTime currentTime = DateTime.Now;
+                
+                try
+                {
+                    // Asynchronously collect all process resource information
+                    var processCollector = new ProcessCollector();
+                    var processResources = await processCollector.CollectProcessResourceInfoAsync(cancellationToken);
+                    
+                    // Output the report based on configuration settings
+                    var reporter = new ReportManager();
+                    await reporter.OutputReportAsync(processResources, currentTime, cancellationToken);
+                }
+                catch (TaskCanceledException)
+                {
+                    // Normal cancellation, just exit
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    // Log any errors that occur during the monitoring process
+                    Console.WriteLine($"Error during monitoring cycle: {ex.Message}");
+                    Console.WriteLine($"Stack trace: {ex.StackTrace}");
+                }
+                
+                // Wait for the next monitoring interval
+                try
+                {
+                    await Task.Delay(ConfigurationManager.MonitorIntervalSeconds * 1000, cancellationToken);
+                    
+                    // Clear console if configured to output to console
+                    if (ConfigurationManager.OutputToConsole)
+                        Console.Clear();
+                }
+                catch (TaskCanceledException)
+                {
+                    // Normal cancellation, just exit
+                    break;
+                }
+            }
+        }
+    }
+}
+```
+
+### 4. 更新 appsettings.json 設定 CSV 輸出格式
 
 ```json
 {
@@ -692,7 +625,8 @@ namespace ProcessMonitor
     "ShowMemoryRanking": true,
     "ShowDetailedProcessInfo": true,
     "LogRetentionDays": 15,
-    "CpuUpdateIntervalMs": 200
+    "CpuUpdateIntervalMs": 200,
+    "OutputFormat": "CSV"
   },
   "Logging": {
     "LogLevel": {
@@ -704,7 +638,7 @@ namespace ProcessMonitor
 }
 ```
 
-### 更新 Program.cs 顯示 CPU 測量設置
+### 5. 更新 Program.cs 顯示輸出格式設置
 
 ```csharp
 using System;
@@ -764,6 +698,7 @@ namespace ProcessMonitor
             {
                 Console.WriteLine($"Log folder: {ConfigurationManager.LogFolderPath}");
                 Console.WriteLine($"Log retention: {ConfigurationManager.LogRetentionDays} days");
+                Console.WriteLine($"Output format: {ConfigurationManager.OutputFormat}");
             }
             Console.WriteLine($"Detailed CPU measurement: {ConfigurationManager.DetailedCpuMeasurement}");
             Console.WriteLine($"CPU update interval: {ConfigurationManager.CpuUpdateIntervalMs}ms");
@@ -775,30 +710,30 @@ namespace ProcessMonitor
 }
 ```
 
-### 改進說明
+### CSV 輸出功能說明
 
-1. **持久性 CPU 使用率追蹤**
-   - 新增 `ProcessCpuUsageTracker` 類別來持續追蹤進程的 CPU 使用
-   - 維護每個進程 ID 的最後處理器時間和時間戳
-   - 使用 `ConcurrentDictionary` 儲存追蹤器，確保線程安全
+1. **CSV 格式支援**
+   - 新增了 ReportFormat 枚舉，支援 Text 和 CSV 兩種格式
+   - 預設設定為 CSV 格式
+   - CSV 文件以 .csv 為副檔名，便於在 Excel 或其他電子表格應用程式中打開
 
-2. **更準確的 CPU 使用率計算**
-   - 使用進程總處理器時間的差異來計算 CPU 使用
-   - 考慮系統 CPU 核心數，確保報告正確的百分比
-   - 為新的進程初始化追蹤器，確保已有基準測量
+2. **CSV 格式結構**
+   - 包含時間戳和基本系統資訊的標頭
+   - 首先列出按 CPU 使用率排序的進程
+   - 如果啟用了記憶體排序，還會包含按記憶體使用率排序的進程
+   - 每個進程行包括：排名、進程名稱、PID、CPU %、記憶體 MB、記憶體 %、啟動時間、描述、服務
 
-3. **配置選項**
-   - 新增 `CpuUpdateIntervalMs` 配置選項，讓使用者可調整 CPU 測量的更新頻率
-   - 預設為 200ms，這應該足夠準確但不會過度消耗系統資源
+3. **CSV 格式化**
+   - 實現了恰當的 CSV 欄位轉義，處理逗號、引號和換行符
+   - 使用不變的文化設定格式化數字，確保全球兼容性
+   - 遵循 RFC 4180 標準 CSV 格式
 
-4. **啟動優化**
-   - 在啟動時預初始化所有進程的 CPU 使用率追蹤器
-   - 等待一段時間後進行初始測量，確保有合理的初始值
+4. **靈活的配置**
+   - 使用者可以通過 appsettings.json 在 CSV 和文本格式之間切換
+   - 保留了原始的文本格式做為備選
 
-5. **異常處理**
-   - 改進的錯誤處理，確保當無法訪問某些進程時不會崩潰
-   - 如果進程消失，自動從追蹤器集合中移除
+5. **文件管理**
+   - 日誌清理功能同時支援 .log 和 .csv 文件
+   - 文件名使用日期格式，允許按日期對數據進行組織
 
-這些改進應該會解決 CPU 使用率顯示為 0% 的問題，提供更準確、持續的 CPU 使用率測量。新的方法通過跟踪每個進程在連續監測間隔之間使用的 CPU 時間，從而確保即使是短暫的 CPU 活動也能被捕獲和報告。
-
-這種方法特別適合監測長時間運行的進程，因為它會累積一段時間內的 CPU 使用情況，而不只是基於單個快照。
+這個 CSV 輸出功能使得進程監視資料更容易被匯入到 Excel、資料庫或其他分析工具中，方便進行後續分析或資料視覺化。同時，它保持了與前面實現的日誌保留功能的兼容性。
