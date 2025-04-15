@@ -1,6 +1,6 @@
-了解，那我們可以使用其他方法獲取系統記憶體信息。我將更新代碼以使用標準的 Win32 API 或 .NET 內建的方法來取得總記憶體，而不依賴於 Microsoft.VisualBasic.Devices。
+我了解了，既然 PerformanceCounter 也無法使用，我們可以進一步簡化代碼，只使用 Win32 API 調用來獲取系統記憶體信息，如果失敗就使用默認值。這是最簡單而且可靠的方法，沒有額外的依賴。
 
-### 更新 ProcessCollector.cs (使用替代方法獲取系統記憶體)
+### 更新 ProcessCollector.cs (僅使用 Win32 API)
 
 ```csharp
 using System;
@@ -59,36 +59,21 @@ namespace ProcessMonitor
                 if (GlobalMemoryStatusEx(memoryStatus))
                 {
                     _totalPhysicalMemoryMB = memoryStatus.ullTotalPhys / 1024.0 / 1024.0;
+                    Console.WriteLine($"Detected total physical memory: {_totalPhysicalMemoryMB:F2} MB");
                 }
                 else
                 {
-                    // If the API call fails, try alternative method
-                    try 
-                    {
-                        // Alternative approach: Try using PerformanceCounter
-                        using (var ramCounter = new PerformanceCounter("Memory", "Available MBytes"))
-                        {
-                            // This only gives available memory, not total
-                            // For simplicity, we'll estimate total based on typical usage
-                            var availableMB = ramCounter.NextValue();
-                            // Assume system is using ~30% of RAM, so total is roughly available/(1-0.3)
-                            _totalPhysicalMemoryMB = availableMB / 0.7;
-                        }
-                    }
-                    catch
-                    {
-                        // Last resort: Just use a reasonable default value
-                        _totalPhysicalMemoryMB = 8192; // 8 GB default
-                    }
+                    // If API call fails, use default value
+                    _totalPhysicalMemoryMB = 8192; // 8 GB default
+                    Console.WriteLine($"Could not detect physical memory. Using default: {_totalPhysicalMemoryMB:F2} MB");
                 }
-                
-                Console.WriteLine($"Detected total physical memory: {_totalPhysicalMemoryMB:F2} MB");
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error retrieving system memory information: {ex.Message}");
                 // Fallback to a reasonable value if we can't get the actual memory
                 _totalPhysicalMemoryMB = 8192; // 8 GB default
+                Console.WriteLine($"Using default memory value: {_totalPhysicalMemoryMB:F2} MB");
             }
         }
         
@@ -241,7 +226,7 @@ namespace ProcessMonitor
 }
 ```
 
-### 更新 csproj 檔案 (移除 Microsoft.VisualBasic 參考)
+### 更新 csproj 檔案 (移除所有不需要的依賴)
 
 ```xml
 <Project Sdk="Microsoft.NET.Sdk">
@@ -255,7 +240,6 @@ namespace ProcessMonitor
     <PackageReference Include="Microsoft.Extensions.Configuration" Version="6.0.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="6.0.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="6.0.0" />
-    <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="6.0.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -267,19 +251,22 @@ namespace ProcessMonitor
 </Project>
 ```
 
-### 說明
+### 簡化的方案說明
 
 1. **系統記憶體獲取**：
-   - 主要方法：使用 Win32 API 的 `GlobalMemoryStatusEx` 函數獲取系統記憶體信息
-   - 備用方法 1：使用 `PerformanceCounter` 類獲取可用記憶體並估算總記憶體
-   - 備用方法 2：如果以上方法都失敗，則使用預設值（8GB）
+   - 只使用 Win32 API 的 `GlobalMemoryStatusEx` 函數獲取系統記憶體信息
+   - 如果 API 調用失敗，使用預設值 (8GB)
+   - 沒有其他依賴或備用方法
 
-2. **依賴庫更改**：
-   - 移除 `Microsoft.VisualBasic` 參考
-   - 添加 `System.Diagnostics.PerformanceCounter` 參考（用於備用方法）
+2. **改進錯誤處理**：
+   - 添加更詳細的錯誤信息輸出
+   - 在啟動時清晰地顯示偵測到的記憶體數量或使用的默認值
 
-3. **新增功能**：
-   - 在啟動時顯示偵測到的系統總記憶體
-   - 使用多層次的備用方法確保在各種環境下都能工作
+3. **移除所有額外的依賴**：
+   - 不再需要 Microsoft.VisualBasic
+   - 不再需要 System.Diagnostics.PerformanceCounter
+   - 只保留配置相關的依賴
 
-這個方法使用了標準的 Win32 API 和 .NET 內建的功能，不需要依賴 Microsoft.
+這是最簡單且可靠的方案，沒有過多的依賴，代碼也更加簡潔。在 Windows 系統上應該能夠正常工作，如果 Win32 API 調用失敗，也有合理的默認值做為備用。
+
+如果你需要這個工具在其他操作系統上運行（例如 Linux 或 macOS），那麼可能需要特定平台的代碼來獲取系統信息。但在 Windows 上，這個方法是最直接的。
