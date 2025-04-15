@@ -1,6 +1,43 @@
-我了解了，既然 PerformanceCounter 也無法使用，我們可以進一步簡化代碼，只使用 Win32 API 調用來獲取系統記憶體信息，如果失敗就使用默認值。這是最簡單而且可靠的方法，沒有額外的依賴。
+可以的，我們可以擴展工具來顯示進程的詳細描述和服務全名，類似於工作管理員。我將更新代碼來獲取和顯示這些信息。
 
-### 更新 ProcessCollector.cs (僅使用 Win32 API)
+### 1. 首先更新 ProcessResourceInfo.cs 添加描述和服務名稱
+
+```csharp
+namespace ProcessMonitor
+{
+    /// <summary>
+    /// Class to store process resource usage information
+    /// </summary>
+    public class ProcessResourceInfo
+    {
+        /// <summary>Name of the process</summary>
+        public string ProcessName { get; set; }
+        
+        /// <summary>Process ID</summary>
+        public int ProcessId { get; set; }
+        
+        /// <summary>CPU usage as percentage</summary>
+        public double CpuUsage { get; set; }
+        
+        /// <summary>Memory usage in megabytes</summary>
+        public double MemoryUsageMB { get; set; }
+        
+        /// <summary>Memory usage as percentage of total system memory</summary>
+        public double MemoryUsagePercent { get; set; }
+        
+        /// <summary>Process start time</summary>
+        public string StartTime { get; set; }
+        
+        /// <summary>Process description</summary>
+        public string Description { get; set; }
+        
+        /// <summary>Associated service name</summary>
+        public string ServiceName { get; set; }
+    }
+}
+```
+
+### 2. 更新 ProcessCollector.cs 以獲取進程描述和服務信息
 
 ```csharp
 using System;
@@ -10,6 +47,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Management;
+using System.ServiceProcess;
+using System.IO;
+using Microsoft.Win32;
 
 namespace ProcessMonitor
 {
@@ -20,6 +61,8 @@ namespace ProcessMonitor
     {
         // Store system memory information to avoid retrieving it for each process
         private double _totalPhysicalMemoryMB;
+        private Dictionary<int, string> _processDescriptions = new Dictionary<int, string>();
+        private Dictionary<int, string> _processServices = new Dictionary<int, string>();
         
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
         private class MEMORYSTATUSEX
@@ -48,6 +91,10 @@ namespace ProcessMonitor
         {
             // Initialize total system memory on creation
             InitializeSystemInfo();
+            
+            // Pre-load process descriptions and service relationships
+            LoadProcessDescriptions();
+            LoadServiceProcesses();
         }
         
         private void InitializeSystemInfo()
@@ -75,6 +122,155 @@ namespace ProcessMonitor
                 _totalPhysicalMemoryMB = 8192; // 8 GB default
                 Console.WriteLine($"Using default memory value: {_totalPhysicalMemoryMB:F2} MB");
             }
+        }
+        
+        /// <summary>
+        /// Loads process descriptions from file info and WMI
+        /// </summary>
+        private void LoadProcessDescriptions()
+        {
+            try
+            {
+                // Try to get process descriptions from WMI
+                using (var searcher = new ManagementObjectSearcher("SELECT ProcessId, Description FROM Win32_Process"))
+                {
+                    foreach (ManagementObject process in searcher.Get())
+                    {
+                        try
+                        {
+                            int pid = Convert.ToInt32(process["ProcessId"]);
+                            string description = process["Description"]?.ToString() ?? "";
+                            
+                            if (!string.IsNullOrEmpty(description))
+                            {
+                                _processDescriptions[pid] = description;
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                
+                // Enhance with file descriptions for running processes
+                foreach (var process in Process.GetProcesses())
+                {
+                    try
+                    {
+                        if (!_processDescriptions.ContainsKey(process.Id) || string.IsNullOrEmpty(_processDescriptions[process.Id]))
+                        {
+                            string description = GetFileDescription(process);
+                            if (!string.IsNullOrEmpty(description))
+                            {
+                                _processDescriptions[process.Id] = description;
+                            }
+                        }
+                    }
+                    catch { }
+                    finally
+                    {
+                        process.Dispose();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: Could not load process descriptions: {ex.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// Gets file description for a process
+        /// </summary>
+        private string GetFileDescription(Process process)
+        {
+            try
+            {
+                string filename = process.MainModule?.FileName;
+                if (string.IsNullOrEmpty(filename))
+                    return string.Empty;
+                
+                // Get file description from version info
+                FileVersionInfo versionInfo = FileVersionInfo.GetVersionInfo(filename);
+                if (!string.IsNullOrEmpty(versionInfo.FileDescription))
+                    return versionInfo.FileDescription;
+                
+                return Path.GetFileName(filename);
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+        
+        /// <summary>
+        /// Loads the mapping between services and their processes
+        /// </summary>
+        private void LoadServiceProcesses()
+        {
+            try
+            {
+                // Get all services
+                ServiceController[] services = ServiceController.GetServices();
+                
+                // For each service, get the associated process ID
+                foreach (var service in services)
+                {
+                    try
+                    {
+                        // Try to get the process ID for this service
+                        if (service.Status != ServiceControllerStatus.Stopped)
+                        {
+                            int processId = GetServiceProcessId(service.ServiceName);
+                            if (processId > 0)
+                            {
+                                string serviceName = service.DisplayName;
+                                if (string.IsNullOrEmpty(serviceName))
+                                    serviceName = service.ServiceName;
+                                
+                                // Add or append to the service name for this process
+                                if (_processServices.ContainsKey(processId))
+                                {
+                                    if (!_processServices[processId].Contains(serviceName))
+                                        _processServices[processId] += ", " + serviceName;
+                                }
+                                else
+                                {
+                                    _processServices[processId] = serviceName;
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                    finally
+                    {
+                        service.Dispose();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: Could not load service information: {ex.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// Gets the process ID for a service using WMI
+        /// </summary>
+        private int GetServiceProcessId(string serviceName)
+        {
+            try
+            {
+                using (var searcher = new ManagementObjectSearcher(
+                    $"SELECT ProcessId FROM Win32_Service WHERE Name = '{serviceName}'"))
+                {
+                    foreach (ManagementObject service in searcher.Get())
+                    {
+                        return Convert.ToInt32(service["ProcessId"]);
+                    }
+                }
+            }
+            catch { }
+            
+            return 0;
         }
         
         /// <summary>
@@ -123,6 +319,16 @@ namespace ProcessMonitor
                         // Some processes may not allow access to their start time
                     }
                     
+                    // Get process description
+                    string description = "N/A";
+                    if (_processDescriptions.ContainsKey(process.Id))
+                        description = _processDescriptions[process.Id];
+                    
+                    // Get service name
+                    string serviceName = string.Empty;
+                    if (_processServices.ContainsKey(process.Id))
+                        serviceName = _processServices[process.Id];
+                    
                     // Return process information
                     return new ProcessResourceInfo
                     {
@@ -131,7 +337,9 @@ namespace ProcessMonitor
                         CpuUsage = cpuUsage,
                         MemoryUsageMB = memoryUsageMB,
                         MemoryUsagePercent = memoryUsagePercent,
-                        StartTime = startTime
+                        StartTime = startTime,
+                        Description = description,
+                        ServiceName = serviceName
                     };
                 }
                 catch (Exception)
@@ -153,11 +361,10 @@ namespace ProcessMonitor
             return results.Where(p => p != null).ToList();
         }
         
-        /// <summary>
-        /// Get a quick estimate of CPU usage for processes
-        /// </summary>
+        // CPU usage measurement methods (Keep these as they were)
         private double GetProcessCpuUsageQuick(Process process)
         {
+            // Same as before...
             try
             {
                 // Get the current processor time
@@ -189,11 +396,9 @@ namespace ProcessMonitor
             }
         }
         
-        /// <summary>
-        /// Get detailed CPU usage for processes with async/await pattern
-        /// </summary>
         private async Task<double> GetProcessCpuUsageDetailedAsync(Process process, CancellationToken cancellationToken)
         {
+            // Same as before...
             try
             {
                 // Get initial CPU time and timestamp
@@ -226,7 +431,308 @@ namespace ProcessMonitor
 }
 ```
 
-### 更新 csproj 檔案 (移除所有不需要的依賴)
+### 3. 更新 MonitoringEngine.cs 以顯示描述和服務名稱
+
+```csharp
+using System;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.Text;
+
+namespace ProcessMonitor
+{
+    /// <summary>
+    /// Main monitoring engine for processes
+    /// </summary>
+    public class MonitoringEngine
+    {
+        /// <summary>
+        /// Start the monitoring loop
+        /// </summary>
+        public async Task StartMonitoringAsync(CancellationToken cancellationToken)
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                // Get current timestamp for this monitoring cycle
+                DateTime currentTime = DateTime.Now;
+                string timeStamp = currentTime.ToString("yyyy-MM-dd HH:mm:ss");
+                
+                // Generate report heading
+                StringBuilder report = new StringBuilder();
+                report.AppendLine($"===== Process Resource Monitor Report =====");
+                report.AppendLine($"Time: {timeStamp}");
+                report.AppendLine();
+                
+                try
+                {
+                    // Asynchronously collect all process resource information
+                    var processCollector = new ProcessCollector();
+                    var processResources = await processCollector.CollectProcessResourceInfoAsync(cancellationToken);
+                    
+                    // Get system memory information
+                    var totalMemory = processResources.Sum(p => p.MemoryUsageMB);
+                    var processCount = processResources.Count;
+                    
+                    // Add system information to report
+                    report.AppendLine($"Total processes monitored: {processCount}");
+                    report.AppendLine($"Total memory usage: {totalMemory:F2} MB");
+                    report.AppendLine();
+                    
+                    // Generate CPU usage ranking
+                    GenerateResourceRanking(report, processResources, 
+                        p => p.CpuUsage, "CPU", ConfigurationManager.ProcessCount);
+                    
+                    report.AppendLine();
+                    
+                    // Generate Memory usage ranking if enabled
+                    if (ConfigurationManager.ShowMemoryRanking)
+                    {
+                        GenerateResourceRanking(report, processResources, 
+                            p => p.MemoryUsagePercent, "Memory", ConfigurationManager.ProcessCount);
+                    }
+                }
+                catch (TaskCanceledException)
+                {
+                    // Normal cancellation, just exit
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    // Log any errors that occur during the monitoring process
+                    report.AppendLine($"Error collecting process information: {ex.Message}");
+                    report.AppendLine($"Stack trace: {ex.StackTrace}");
+                }
+                
+                report.AppendLine();
+                report.AppendLine($"Next update will occur at: {DateTime.Now.AddSeconds(ConfigurationManager.MonitorIntervalSeconds).ToString("yyyy-MM-dd HH:mm:ss")}");
+                report.AppendLine(new string('=', 100));
+                
+                // Output the report based on configuration settings
+                var reporter = new ReportManager();
+                await reporter.OutputReportAsync(report.ToString(), currentTime, cancellationToken);
+                
+                // Wait for the next monitoring interval
+                try
+                {
+                    await Task.Delay(ConfigurationManager.MonitorIntervalSeconds * 1000, cancellationToken);
+                    
+                    // Clear console if configured to output to console
+                    if (ConfigurationManager.OutputToConsole)
+                        Console.Clear();
+                }
+                catch (TaskCanceledException)
+                {
+                    // Normal cancellation, just exit
+                    break;
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Generates a resource usage ranking table for the specified resource
+        /// </summary>
+        private void GenerateResourceRanking(StringBuilder report, List<ProcessResourceInfo> processes, 
+                                          Func<ProcessResourceInfo, double> resourceSelector, 
+                                          string resourceName, int count)
+        {
+            // Sort processes by the specified resource usage and take top N
+            var topProcesses = processes
+                .OrderByDescending(resourceSelector)
+                .Take(count)
+                .ToList();
+            
+            // Add header to report
+            report.AppendLine($"Top {count} processes by {resourceName} usage:");
+            
+            // Determine if we should show detailed info
+            if (ConfigurationManager.ShowDetailedProcessInfo)
+            {
+                report.AppendLine($"{"Rank".PadRight(5)}{"Process Name".PadRight(30)}{"PID".PadRight(10)}{$"{resourceName} (%)".PadRight(12)}{"Memory (MB)".PadRight(15)}{"Start Time".PadRight(20)}{"Description".PadRight(40)}");
+                report.AppendLine(new string('-', 132));
+                
+                // Add each process to report with ranking
+                for (int i = 0; i < topProcesses.Count; i++)
+                {
+                    var proc = topProcesses[i];
+                    double resourceValue = resourceSelector(proc);
+                    
+                    report.AppendLine($"{(i+1).ToString().PadRight(5)}" +
+                                    $"{proc.ProcessName.PadRight(30)}" +
+                                    $"{proc.ProcessId.ToString().PadRight(10)}" +
+                                    $"{resourceValue.ToString("F2").PadRight(12)}" +
+                                    $"{proc.MemoryUsageMB.ToString("F2").PadRight(15)}" +
+                                    $"{proc.StartTime.PadRight(20)}" +
+                                    $"{TruncateString(proc.Description, 40).PadRight(40)}");
+                    
+                    // If there's a service associated with this process, show it indented on the next line
+                    if (!string.IsNullOrEmpty(proc.ServiceName))
+                    {
+                        report.AppendLine($"     {"Service: " + proc.ServiceName}");
+                    }
+                }
+            }
+            else
+            {
+                // Original simplified display
+                report.AppendLine($"{"Rank".PadRight(5)}{"Process Name".PadRight(30)}{"PID".PadRight(10)}{$"{resourceName} (%)".PadRight(12)}{"Memory (MB)".PadRight(15)}{"Start Time".PadRight(20)}");
+                report.AppendLine(new string('-', 92));
+                
+                // Add each process to report with ranking
+                for (int i = 0; i < topProcesses.Count; i++)
+                {
+                    var proc = topProcesses[i];
+                    double resourceValue = resourceSelector(proc);
+                    
+                    report.AppendLine($"{(i+1).ToString().PadRight(5)}" +
+                                    $"{proc.ProcessName.PadRight(30)}" +
+                                    $"{proc.ProcessId.ToString().PadRight(10)}" +
+                                    $"{resourceValue.ToString("F2").PadRight(12)}" +
+                                    $"{proc.MemoryUsageMB.ToString("F2").PadRight(15)}" +
+                                    $"{proc.StartTime.PadRight(20)}");
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Truncates a string to a maximum length and adds ellipsis if needed
+        /// </summary>
+        private string TruncateString(string input, int maxLength)
+        {
+            if (string.IsNullOrEmpty(input))
+                return string.Empty;
+                
+            if (input.Length <= maxLength)
+                return input;
+                
+            return input.Substring(0, maxLength - 3) + "...";
+        }
+    }
+}
+```
+
+### 4. 更新 ConfigurationManager.cs 以添加詳細進程信息的配置選項
+
+```csharp
+using System;
+using System.Collections.Generic;
+using System.IO;
+using Microsoft.Extensions.Configuration;
+
+namespace ProcessMonitor
+{
+    /// <summary>
+    /// Manages application configuration settings from appsettings.json
+    /// </summary>
+    public static class ConfigurationManager
+    {
+        private static IConfiguration _configuration;
+        
+        // Configuration settings
+        public static string LogFolderPath { get; private set; }
+        public static bool OutputToConsole { get; private set; }
+        public static bool OutputToFile { get; private set; }
+        public static int MonitorIntervalSeconds { get; private set; }
+        public static int ProcessCount { get; private set; }
+        public static bool DetailedCpuMeasurement { get; private set; }
+        public static bool ShowMemoryRanking { get; private set; }
+        public static bool ShowDetailedProcessInfo { get; private set; }
+
+        /// <summary>
+        /// Initialize configuration settings from appsettings.json
+        /// </summary>
+        public static void Initialize()
+        {
+            try
+            {
+                // Build configuration from appsettings.json
+                _configuration = new ConfigurationBuilder()
+                    .SetBasePath(Directory.GetCurrentDirectory())
+                    .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
+                    .Build();
+                
+                // Get "ProcessMonitorSettings" section
+                var settings = _configuration.GetSection("ProcessMonitorSettings");
+                
+                // Read config values with defaults
+                LogFolderPath = settings["LogFolderPath"] ?? 
+                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
+                    
+                OutputToConsole = settings.GetValue<bool?>("OutputToConsole") ?? true;
+                OutputToFile = settings.GetValue<bool?>("OutputToFile") ?? true;
+                MonitorIntervalSeconds = settings.GetValue<int?>("MonitorIntervalSeconds") ?? 60;
+                ProcessCount = settings.GetValue<int?>("ProcessCount") ?? 10;
+                DetailedCpuMeasurement = settings.GetValue<bool?>("DetailedCpuMeasurement") ?? true;
+                ShowMemoryRanking = settings.GetValue<bool?>("ShowMemoryRanking") ?? true;
+                ShowDetailedProcessInfo = settings.GetValue<bool?>("ShowDetailedProcessInfo") ?? true;
+                
+                // Ensure log directory exists if we're outputting to file
+                if (OutputToFile && !Directory.Exists(LogFolderPath))
+                    Directory.CreateDirectory(LogFolderPath);
+            }
+            catch (Exception ex)
+            {
+                // If there's an error reading config, use default values and log the error
+                Console.WriteLine($"Error reading configuration: {ex.Message}. Using default values.");
+                
+                // Set default values
+                LogFolderPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
+                OutputToConsole = true;
+                OutputToFile = true;
+                MonitorIntervalSeconds = 60;
+                ProcessCount = 10;
+                DetailedCpuMeasurement = true;
+                ShowMemoryRanking = true;
+                ShowDetailedProcessInfo = true;
+                
+                // Create logs directory with default values
+                try
+                {
+                    if (OutputToFile && !Directory.Exists(LogFolderPath))
+                        Directory.CreateDirectory(LogFolderPath);
+                }
+                catch { }
+            }
+        }
+        
+        /// <summary>
+        /// Gets the raw configuration object for advanced usage
+        /// </summary>
+        public static IConfiguration GetRawConfiguration()
+        {
+            return _configuration;
+        }
+    }
+}
+```
+
+### 5. 更新 appsettings.json 添加新的配置選項
+
+```json
+{
+  "ProcessMonitorSettings": {
+    "LogFolderPath": "C:\\ProcessMonitorLogs",
+    "OutputToConsole": true,
+    "OutputToFile": true,
+    "MonitorIntervalSeconds": 60,
+    "ProcessCount": 10,
+    "DetailedCpuMeasurement": true,
+    "ShowMemoryRanking": true,
+    "ShowDetailedProcessInfo": true
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft": "Warning",
+      "System": "Warning"
+    }
+  }
+}
+```
+
+### 6. 更新 csproj 添加 System.Management 和 System.ServiceProcess 引用
 
 ```xml
 <Project Sdk="Microsoft.NET.Sdk">
@@ -240,6 +746,8 @@ namespace ProcessMonitor
     <PackageReference Include="Microsoft.Extensions.Configuration" Version="6.0.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="6.0.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="6.0.0" />
+    <PackageReference Include="System.Management" Version="6.0.0" />
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="6.0.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -251,22 +759,108 @@ namespace ProcessMonitor
 </Project>
 ```
 
-### 簡化的方案說明
+### 7. 更新 Program.cs 以顯示新的配置設置
 
-1. **系統記憶體獲取**：
-   - 只使用 Win32 API 的 `GlobalMemoryStatusEx` 函數獲取系統記憶體信息
-   - 如果 API 調用失敗，使用預設值 (8GB)
-   - 沒有其他依賴或備用方法
+```csharp
+using System;
+using System.Threading;
+using System.Threading.Tasks;
 
-2. **改進錯誤處理**：
-   - 添加更詳細的錯誤信息輸出
-   - 在啟動時清晰地顯示偵測到的記憶體數量或使用的默認值
+namespace ProcessMonitor
+{
+    class Program
+    {
+        private static CancellationTokenSource _cancellationTokenSource;
 
-3. **移除所有額外的依賴**：
-   - 不再需要 Microsoft.VisualBasic
-   - 不再需要 System.Diagnostics.PerformanceCounter
-   - 只保留配置相關的依賴
+        static async Task Main(string[] args)
+        {
+            try
+            {
+                // Initialize application configuration from appsettings.json
+                ConfigurationManager.Initialize();
+                
+                // Create cancellation token source for graceful shutdown
+                _cancellationTokenSource = new CancellationTokenSource();
 
-這是最簡單且可靠的方案，沒有過多的依賴，代碼也更加簡潔。在 Windows 系統上應該能夠正常工作，如果 Win32 API 調用失敗，也有合理的默認值做為備用。
+                // Handle Ctrl+C to gracefully exit
+                Console.CancelKeyPress += (sender, e) => {
+                    e.Cancel = true;
+                    _cancellationTokenSource.Cancel();
+                    Console.WriteLine("Shutting down...");
+                };
+                
+                // Display startup message
+                DisplayStartupInfo();
+                
+                // Main monitoring loop
+                MonitoringEngine monitor = new MonitoringEngine();
+                await monitor.StartMonitoringAsync(_cancellationTokenSource.Token);
+                
+                Console.WriteLine("Process monitor has been shut down.");
+            }
+            catch (Exception ex)
+            {
+                // Handle any unhandled exceptions
+                Console.WriteLine($"Fatal error: {ex.Message}");
+                Console.WriteLine($"Stack trace: {ex.StackTrace}");
+                Console.WriteLine("Press any key to exit...");
+                Console.ReadKey();
+            }
+        }
+        
+        private static void DisplayStartupInfo()
+        {
+            Console.WriteLine("Process Resource Monitor Started...");
+            Console.WriteLine($"Time: {DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")}");
+            Console.WriteLine($"Monitoring top {ConfigurationManager.ProcessCount} processes every {ConfigurationManager.MonitorIntervalSeconds} seconds");
+            Console.WriteLine($"Output to console: {ConfigurationManager.OutputToConsole}");
+            Console.WriteLine($"Output to file: {ConfigurationManager.OutputToFile}");
+            if (ConfigurationManager.OutputToFile)
+                Console.WriteLine($"Log folder: {ConfigurationManager.LogFolderPath}");
+            Console.WriteLine($"Detailed CPU measurement: {ConfigurationManager.DetailedCpuMeasurement}");
+            Console.WriteLine($"Show memory ranking: {ConfigurationManager.ShowMemoryRanking}");
+            Console.WriteLine($"Show detailed process info: {ConfigurationManager.ShowDetailedProcessInfo}");
+            Console.WriteLine("Note: Non-administrator privileges may limit access to system processes\n");
+        }
+    }
+}
+```
 
-如果你需要這個工具在其他操作系統上運行（例如 Linux 或 macOS），那麼可能需要特定平台的代碼來獲取系統信息。但在 Windows 上，這個方法是最直接的。
+### 功能說明
+
+這個更新版本添加了以下功能：
+
+1. **進程描述（Description）**
+   - 使用 WMI (Windows Management Instrumentation) 獲取進程的描述
+   - 如果 WMI 沒有提供描述，嘗試從檔案版本信息獲取
+   - 在報告中顯示每個進程的描述
+
+2. **服務名稱（ServiceName）**
+   - 使用 ServiceController 和 WMI 獲取每個進程關聯的 Windows 服務
+   - 如果一個進程關聯多個服務，將它們組合在一起
+   - 在報告中顯示每個進程的服務名稱（如果有）
+
+3. **可配置的詳細信息顯示**
+   - 添加了 `ShowDetailedProcessInfo` 配置選項，可在 appsettings.json 中設置
+   - 當啟用時，報告將包含進程描述和服務名稱
+   - 當禁用時，維持原來簡潔的格式
+
+4. **改進的輸出格式**
+   - 為長描述添加了截斷功能，確保報告格式整齊
+   - 服務信息顯示在單獨的行，並進行縮進以提高可讀性
+
+### 注意事項
+
+1. **依賴項**
+   - System.Management：用於 WMI 查詢
+   - System.ServiceProcess.ServiceController：用於服務信息
+
+2. **權限要求**
+   - 獲取某些進程的詳細信息可能需要管理員權限
+   - 程序會優雅地處理不可訪問的進程
+
+3. **性能考慮**
+   - 在啟動時預加載進程描述和服務信息，避免每次報告時重新查詢
+   - 對於大量進程的系統，初始載入可能會稍微延長啟動時間
+
+這個功能讓你的進程監視器更像 Windows 任務管理器，提供更豐富的信息來幫助你識別和理解系統中運行的進程。
