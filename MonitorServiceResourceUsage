@@ -1,513 +1,81 @@
-好的，我將修改代碼，使其只使用 CSV 格式，完全移除日誌文本格式選項。以下是更新的代碼：
+我看到問題了，在 MonitoringEngine.cs 檔案中，報告是以字串形式生成的，但新版的 ReportManager.OutputReportAsync 已經變成接收 List<ProcessResourceInfo> 而不是字串。我需要更新 MonitoringEngine.cs 檔案以適應新的 ReportManager 介面。
 
-### 1. 簡化 ConfigurationManager.cs（移除 ReportFormat 枚舉）
+以下是更新後的 MonitoringEngine.cs 檔案:
 
 ```csharp
 using System;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Collections.Generic;
-using System.IO;
-using Microsoft.Extensions.Configuration;
+using System.Text;
 
 namespace ProcessMonitor
 {
     /// <summary>
-    /// Manages application configuration settings from appsettings.json
+    /// Main monitoring engine for processes
     /// </summary>
-    public static class ConfigurationManager
+    public class MonitoringEngine
     {
-        private static IConfiguration _configuration;
-        
-        // Configuration settings
-        public static string LogFolderPath { get; private set; }
-        public static bool OutputToConsole { get; private set; }
-        public static bool OutputToFile { get; private set; }
-        public static int MonitorIntervalSeconds { get; private set; }
-        public static int ProcessCount { get; private set; }
-        public static bool DetailedCpuMeasurement { get; private set; }
-        public static bool ShowMemoryRanking { get; private set; }
-        public static bool ShowDetailedProcessInfo { get; private set; }
-        public static int LogRetentionDays { get; private set; }
-        public static int CpuUpdateIntervalMs { get; private set; }
-
         /// <summary>
-        /// Initialize configuration settings from appsettings.json
+        /// Start the monitoring loop
         /// </summary>
-        public static void Initialize()
+        public async Task StartMonitoringAsync(CancellationToken cancellationToken)
         {
-            try
+            while (!cancellationToken.IsCancellationRequested)
             {
-                // Build configuration from appsettings.json
-                _configuration = new ConfigurationBuilder()
-                    .SetBasePath(Directory.GetCurrentDirectory())
-                    .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
-                    .Build();
+                // Get current timestamp for this monitoring cycle
+                DateTime currentTime = DateTime.Now;
                 
-                // Get "ProcessMonitorSettings" section
-                var settings = _configuration.GetSection("ProcessMonitorSettings");
-                
-                // Read config values with defaults
-                LogFolderPath = settings["LogFolderPath"] ?? 
-                    Path.Combine(Directory.GetCurrentDirectory(), "logs");
-                    
-                OutputToConsole = settings.GetValue<bool?>("OutputToConsole") ?? true;
-                OutputToFile = settings.GetValue<bool?>("OutputToFile") ?? true;
-                MonitorIntervalSeconds = settings.GetValue<int?>("MonitorIntervalSeconds") ?? 60;
-                ProcessCount = settings.GetValue<int?>("ProcessCount") ?? 10;
-                DetailedCpuMeasurement = settings.GetValue<bool?>("DetailedCpuMeasurement") ?? true;
-                ShowMemoryRanking = settings.GetValue<bool?>("ShowMemoryRanking") ?? true;
-                ShowDetailedProcessInfo = settings.GetValue<bool?>("ShowDetailedProcessInfo") ?? true;
-                LogRetentionDays = settings.GetValue<int?>("LogRetentionDays") ?? 15;
-                CpuUpdateIntervalMs = settings.GetValue<int?>("CpuUpdateIntervalMs") ?? 200;
-                
-                // Validate settings
-                if (LogRetentionDays < 1)
-                {
-                    Console.WriteLine("Warning: LogRetentionDays must be at least 1. Setting to default (15).");
-                    LogRetentionDays = 15;
-                }
-                
-                if (CpuUpdateIntervalMs < 100)
-                {
-                    Console.WriteLine("Warning: CpuUpdateIntervalMs must be at least 100ms. Setting to default (200ms).");
-                    CpuUpdateIntervalMs = 200;
-                }
-                
-                // Ensure log directory exists if we're outputting to file
-                if (OutputToFile && !Directory.Exists(LogFolderPath))
-                {
-                    Directory.CreateDirectory(LogFolderPath);
-                    Console.WriteLine($"Created log directory: {LogFolderPath}");
-                }
-            }
-            catch (Exception ex)
-            {
-                // If there's an error reading config, use default values and log the error
-                Console.WriteLine($"Error reading configuration: {ex.Message}. Using default values.");
-                
-                // Set default values
-                LogFolderPath = Path.Combine(Directory.GetCurrentDirectory(), "logs");
-                OutputToConsole = true;
-                OutputToFile = true;
-                MonitorIntervalSeconds = 60;
-                ProcessCount = 10;
-                DetailedCpuMeasurement = true;
-                ShowMemoryRanking = true;
-                ShowDetailedProcessInfo = true;
-                LogRetentionDays = 15;
-                CpuUpdateIntervalMs = 200;
-                
-                // Create logs directory with default values
                 try
                 {
-                    if (OutputToFile && !Directory.Exists(LogFolderPath))
-                    {
-                        Directory.CreateDirectory(LogFolderPath);
-                        Console.WriteLine($"Created log directory: {LogFolderPath}");
-                    }
-                }
-                catch (Exception dirEx)
-                {
-                    Console.WriteLine($"Failed to create log directory: {dirEx.Message}");
-                } 
-            }
-        }
-        
-        /// <summary>
-        /// Gets the raw configuration object for advanced usage
-        /// </summary>
-        public static IConfiguration GetRawConfiguration()
-        {
-            return _configuration;
-        }
-    }
-}
-```
-
-### 2. 重寫 ReportManager.cs 專門處理 CSV 輸出
-
-```csharp
-using System;
-using System.IO;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Linq;
-using System.Collections.Generic;
-using System.Globalization;
-
-namespace ProcessMonitor
-{
-    /// <summary>
-    /// Responsible for handling output of monitoring reports
-    /// </summary>
-    public class ReportManager
-    {
-        // Keep track of when we last cleaned up old logs
-        private static DateTime _lastLogCleanupTime = DateTime.MinValue;
-        
-        /// <summary>
-        /// Output a monitoring report to configured destinations
-        /// </summary>
-        /// <param name="processResources">The list of process resources to output</param>
-        /// <param name="timestamp">Timestamp for the report</param>
-        /// <param name="cancellationToken">Cancellation token</param>
-        public async Task OutputReportAsync(List<ProcessResourceInfo> processResources, 
-                                           DateTime timestamp, 
-                                           CancellationToken cancellationToken)
-        {
-            // Create CSV report
-            string csvReport = GenerateCSVReport(processResources, timestamp);
-            
-            // Output to console if configured
-            if (ConfigurationManager.OutputToConsole)
-            {
-                OutputToConsole(csvReport);
-            }
-            
-            // Output to file if configured
-            if (ConfigurationManager.OutputToFile)
-            {
-                await OutputToFileAsync(csvReport, timestamp, cancellationToken);
-                
-                // Clean up old log files once per day
-                if ((DateTime.Now - _lastLogCleanupTime).TotalHours >= 24)
-                {
-                    await CleanupOldLogsAsync(cancellationToken);
-                    _lastLogCleanupTime = DateTime.Now;
-                }
-            }
-        }
-        
-        /// <summary>
-        /// Generates a CSV format report
-        /// </summary>
-        private string GenerateCSVReport(List<ProcessResourceInfo> processResources, DateTime timestamp)
-        {
-            StringBuilder csv = new StringBuilder();
-            
-            // Add timestamp row
-            csv.AppendLine($"Timestamp,{timestamp.ToString("yyyy-MM-dd HH:mm:ss")}");
-            csv.AppendLine($"Total Processes,{processResources.Count}");
-            csv.AppendLine($"Total Memory (MB),{processResources.Sum(p => p.MemoryUsageMB):F2}");
-            csv.AppendLine();
-            
-            // Add CSV headers
-            csv.AppendLine("Rank,Process Name,PID,CPU (%),Memory (MB),Memory (%),Start Time,Description,Service");
-            
-            // Sort by CPU usage and add top processes
-            var topCpuProcesses = processResources
-                .OrderByDescending(p => p.CpuUsage)
-                .Take(ConfigurationManager.ProcessCount)
-                .ToList();
-                
-            for (int i = 0; i < topCpuProcesses.Count; i++)
-            {
-                var proc = topCpuProcesses[i];
-                csv.AppendLine(FormatCSVRow(i + 1, proc));
-            }
-            
-            // Add a separator before memory section if enabled
-            if (ConfigurationManager.ShowMemoryRanking)
-            {
-                csv.AppendLine();
-                csv.AppendLine("Memory Ranking");
-                csv.AppendLine("Rank,Process Name,PID,CPU (%),Memory (MB),Memory (%),Start Time,Description,Service");
-                
-                // Sort by memory usage and add top processes
-                var topMemoryProcesses = processResources
-                    .OrderByDescending(p => p.MemoryUsageMB)
-                    .Take(ConfigurationManager.ProcessCount)
-                    .ToList();
+                    // Asynchronously collect all process resource information
+                    var processCollector = new ProcessCollector();
+                    var processResources = await processCollector.CollectProcessResourceInfoAsync(cancellationToken);
                     
-                for (int i = 0; i < topMemoryProcesses.Count; i++)
-                {
-                    var proc = topMemoryProcesses[i];
-                    csv.AppendLine(FormatCSVRow(i + 1, proc));
+                    // Output the report based on configuration settings
+                    var reporter = new ReportManager();
+                    await reporter.OutputReportAsync(processResources, currentTime, cancellationToken);
                 }
-            }
-            
-            return csv.ToString();
-        }
-        
-        /// <summary>
-        /// Format a process information row for CSV
-        /// </summary>
-        private string FormatCSVRow(int rank, ProcessResourceInfo proc)
-        {
-            // Properly escape CSV fields to handle commas and quotes
-            return $"{rank}," +
-                   $"{EscapeCSV(proc.ProcessName)}," +
-                   $"{proc.ProcessId}," +
-                   $"{proc.CpuUsage.ToString("F2", CultureInfo.InvariantCulture)}," +
-                   $"{proc.MemoryUsageMB.ToString("F2", CultureInfo.InvariantCulture)}," +
-                   $"{proc.MemoryUsagePercent.ToString("F2", CultureInfo.InvariantCulture)}," +
-                   $"{EscapeCSV(proc.StartTime)}," +
-                   $"{EscapeCSV(proc.Description)}," +
-                   $"{EscapeCSV(proc.ServiceName)}";
-        }
-        
-        /// <summary>
-        /// Escape a string for CSV format
-        /// </summary>
-        private string EscapeCSV(string field)
-        {
-            if (string.IsNullOrEmpty(field))
-                return string.Empty;
-                
-            // If the field contains a comma, newline, or quote, wrap it in quotes
-            if (field.Contains(",") || field.Contains("\"") || field.Contains("\r") || field.Contains("\n"))
-            {
-                // Replace any quotes with double quotes
-                field = field.Replace("\"", "\"\"");
-                
-                // Wrap the field in quotes
-                return $"\"{field}\"";
-            }
-            
-            return field;
-        }
-        
-        /// <summary>
-        /// Output the report to the console
-        /// </summary>
-        private void OutputToConsole(string reportText)
-        {
-            try
-            {
-                Console.Clear();
-                Console.WriteLine(reportText);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error writing to console: {ex.Message}");
-            }
-        }
-        
-        /// <summary>
-        /// Output the report to a CSV file
-        /// </summary>
-        private async Task OutputToFileAsync(string reportText, DateTime timestamp, CancellationToken cancellationToken)
-        {
-            try
-            {
-                // Ensure log directory exists
-                if (!Directory.Exists(ConfigurationManager.LogFolderPath))
+                catch (TaskCanceledException)
                 {
-                    try
-                    {
-                        Directory.CreateDirectory(ConfigurationManager.LogFolderPath);
-                        Console.WriteLine($"Created log directory: {ConfigurationManager.LogFolderPath}");
-                    }
-                    catch (Exception dirEx)
-                    {
-                        Console.WriteLine($"Failed to create log directory: {dirEx.Message}");
-                        return; // Cannot proceed without a log directory
-                    }
+                    // Normal cancellation, just exit
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    // Log any errors that occur during the monitoring process
+                    Console.WriteLine($"Error during monitoring cycle: {ex.Message}");
+                    Console.WriteLine($"Stack trace: {ex.StackTrace}");
                 }
                 
-                // Create timestamped filename with CSV extension
-                string filename = $"ProcessMonitor_{timestamp.ToString("yyyy-MM-dd")}.csv";
-                string filePath = Path.Combine(ConfigurationManager.LogFolderPath, filename);
-                
-                // Determine if we need to add headers
-                bool addHeaders = !File.Exists(filePath) || new FileInfo(filePath).Length == 0;
-                
-                // Write to the file, appending the report
-                using (StreamWriter writer = new StreamWriter(filePath, true, Encoding.UTF8))
+                // Wait for the next monitoring interval
+                try
                 {
-                    await writer.WriteLineAsync(reportText);
-                    await writer.FlushAsync();
-                }
-                
-                Console.WriteLine($"Report saved to: {filePath}");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error writing report to file: {ex.Message}");
-            }
-        }
-        
-        /// <summary>
-        /// Clean up CSV files older than the retention period
-        /// </summary>
-        private async Task CleanupOldLogsAsync(CancellationToken cancellationToken)
-        {
-            try
-            {
-                // Calculate the cutoff date for log retention
-                DateTime cutoffDate = DateTime.Now.AddDays(-ConfigurationManager.LogRetentionDays);
-                
-                // Get all CSV files
-                DirectoryInfo logDir = new DirectoryInfo(ConfigurationManager.LogFolderPath);
-                if (!logDir.Exists)
-                    return;
-                
-                // Find files older than the cutoff date
-                var oldFiles = logDir.GetFiles("ProcessMonitor_*.csv")
-                    .Where(f => f.LastWriteTime < cutoffDate)
-                    .ToList();
-                
-                if (oldFiles.Count > 0)
-                {
-                    Console.WriteLine($"Cleaning up {oldFiles.Count} CSV files older than {ConfigurationManager.LogRetentionDays} days...");
+                    await Task.Delay(ConfigurationManager.MonitorIntervalSeconds * 1000, cancellationToken);
                     
-                    // Delete old files
-                    foreach (var file in oldFiles)
-                    {
-                        try
-                        {
-                            // Check for cancellation
-                            cancellationToken.ThrowIfCancellationRequested();
-                            
-                            // Delete the file
-                            file.Delete();
-                            
-                            // Pause briefly to avoid overwhelming the file system
-                            await Task.Delay(20, cancellationToken);
-                        }
-                        catch (OperationCanceledException)
-                        {
-                            throw; // Rethrow cancellation exception
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"Failed to delete old CSV file {file.Name}: {ex.Message}");
-                        }
-                    }
-                    
-                    Console.WriteLine("CSV cleanup completed.");
+                    // Clear console if configured to output to console
+                    if (ConfigurationManager.OutputToConsole)
+                        Console.Clear();
+                }
+                catch (TaskCanceledException)
+                {
+                    // Normal cancellation, just exit
+                    break;
                 }
             }
-            catch (OperationCanceledException)
-            {
-                // Just bubble up cancellation exceptions
-                throw;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error during CSV cleanup: {ex.Message}");
-            }
         }
     }
 }
 ```
 
-### 3. 更新 appsettings.json（移除 OutputFormat 選項）
+程式碼已更新，移除了舊版的字串報告生成方式，改為直接將收集到的進程資源資訊（List<ProcessResourceInfo>）傳遞給 ReportManager.OutputReportAsync 方法。
 
-```json
-{
-  "ProcessMonitorSettings": {
-    "LogFolderPath": "logs",
-    "OutputToConsole": true,
-    "OutputToFile": true,
-    "MonitorIntervalSeconds": 60,
-    "ProcessCount": 10,
-    "DetailedCpuMeasurement": true,
-    "ShowMemoryRanking": true,
-    "ShowDetailedProcessInfo": true,
-    "LogRetentionDays": 15,
-    "CpuUpdateIntervalMs": 200
-  },
-  "Logging": {
-    "LogLevel": {
-      "Default": "Information",
-      "Microsoft": "Warning",
-      "System": "Warning"
-    }
-  }
-}
-```
+主要變更:
 
-### 4. 更新 Program.cs（移除輸出格式顯示）
+1. 移除了舊版的字串報告生成邏輯
+2. 直接將從 ProcessCollector 獲取的 processResources 傳遞給 ReportManager
+3. ReportManager 現在負責所有 CSV 格式的處理和生成
 
-```csharp
-using System;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace ProcessMonitor
-{
-    class Program
-    {
-        private static CancellationTokenSource _cancellationTokenSource;
-
-        static async Task Main(string[] args)
-        {
-            try
-            {
-                // Initialize application configuration from appsettings.json
-                ConfigurationManager.Initialize();
-                
-                // Create cancellation token source for graceful shutdown
-                _cancellationTokenSource = new CancellationTokenSource();
-
-                // Handle Ctrl+C to gracefully exit
-                Console.CancelKeyPress += (sender, e) => {
-                    e.Cancel = true;
-                    _cancellationTokenSource.Cancel();
-                    Console.WriteLine("Shutting down...");
-                };
-                
-                // Display startup message
-                DisplayStartupInfo();
-                
-                // Main monitoring loop
-                MonitoringEngine monitor = new MonitoringEngine();
-                await monitor.StartMonitoringAsync(_cancellationTokenSource.Token);
-                
-                Console.WriteLine("Process monitor has been shut down.");
-            }
-            catch (Exception ex)
-            {
-                // Handle any unhandled exceptions
-                Console.WriteLine($"Fatal error: {ex.Message}");
-                Console.WriteLine($"Stack trace: {ex.StackTrace}");
-                Console.WriteLine("Press any key to exit...");
-                Console.ReadKey();
-            }
-        }
-        
-        private static void DisplayStartupInfo()
-        {
-            Console.WriteLine("Process Resource Monitor Started...");
-            Console.WriteLine($"Time: {DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")}");
-            Console.WriteLine($"Monitoring top {ConfigurationManager.ProcessCount} processes every {ConfigurationManager.MonitorIntervalSeconds} seconds");
-            Console.WriteLine($"Output to console: {ConfigurationManager.OutputToConsole}");
-            Console.WriteLine($"Output to file: {ConfigurationManager.OutputToFile}");
-            if (ConfigurationManager.OutputToFile)
-            {
-                Console.WriteLine($"CSV folder: {ConfigurationManager.LogFolderPath}");
-                Console.WriteLine($"CSV retention: {ConfigurationManager.LogRetentionDays} days");
-            }
-            Console.WriteLine($"Detailed CPU measurement: {ConfigurationManager.DetailedCpuMeasurement}");
-            Console.WriteLine($"CPU update interval: {ConfigurationManager.CpuUpdateIntervalMs}ms");
-            Console.WriteLine($"Show memory ranking: {ConfigurationManager.ShowMemoryRanking}");
-            Console.WriteLine($"Show detailed process info: {ConfigurationManager.ShowDetailedProcessInfo}");
-            Console.WriteLine("Note: Non-administrator privileges may limit access to system processes\n");
-        }
-    }
-}
-```
-
-### 變更摘要：
-
-1. **完全移除 .log 格式**
-   - 刪除了 ReportFormat 枚舉和相關設定選項
-   - 移除了文本報告生成方法
-   - 所有輸出現在都是 CSV 格式
-
-2. **簡化 ReportManager**
-   - 專注於 CSV 格式生成和輸出
-   - 保留了 CSV 欄位轉義和格式化功能
-   - 輸出檔案統一使用 .csv 副檔名
-
-3. **日誌清理功能更新**
-   - 現在僅清理 .csv 檔案
-   - 保留了基於配置的保留期功能
-
-4. **配置文件和啟動信息更新**
-   - 移除了輸出格式選項
-   - 將 "Log folder" 顯示更新為 "CSV folder"
-   - 將 "Log retention" 改為 "CSV retention"
-
-現在程式將只產生和管理 CSV 格式的輸出檔案，完全不使用文本日誌格式。這使得輸出資料易於匯入到 Excel 或其他分析工具中，同時保持了原有的功能，如進程監視、CPU 和記憶體用量排名以及日誌保留期限等。
+這樣修改後，程式將正確使用新的 ReportManager 介面，生成 CSV 格式的報告。舊版的基於字串的報告已經完全移除，避免在函數調用時出現類型不匹配的錯誤。
