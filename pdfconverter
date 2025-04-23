@@ -1,0 +1,91 @@
+using System;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
+using PdfiumViewer;
+
+namespace PdfToPngConverter
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            // 設置PDF路徑和輸出目錄
+            string pdfPath = @"C:\path\to\your\document.pdf";  // 請替換為您的PDF文件路徑
+            string outputFolder = @"C:\path\to\output\folder";  // 請替換為您的輸出目錄路徑
+            
+            // 調用轉換方法
+            ConvertPdfToPng(pdfPath, outputFolder);
+            
+            Console.WriteLine("轉換完成，按任意鍵退出...");
+            Console.ReadKey();
+        }
+        
+        /// <summary>
+        /// 將PDF文件轉換為PNG圖片
+        /// </summary>
+        /// <param name="pdfPath">PDF文件的路徑</param>
+        /// <param name="outputFolder">輸出PNG圖片的文件夾路徑</param>
+        /// <param name="dpi">輸出圖片的DPI值，預設為300</param>
+        public static void ConvertPdfToPng(string pdfPath, string outputFolder, int dpi = 300)
+        {
+            // 檢查PDF文件是否存在
+            if (!File.Exists(pdfPath))
+            {
+                throw new FileNotFoundException("找不到指定的PDF文件", pdfPath);
+            }
+            
+            // 確保輸出目錄存在
+            if (!Directory.Exists(outputFolder))
+            {
+                Directory.CreateDirectory(outputFolder);
+            }
+            
+            // 計算縮放系數 (PDF默認使用72 DPI)
+            float scale = dpi / 72f;
+            
+            try
+            {
+                // 載入PDF文件
+                using (PdfDocument document = PdfDocument.Load(pdfPath))
+                {
+                    // 獲取PDF頁數
+                    int pageCount = document.PageCount;
+                    Console.WriteLine($"PDF文件共有 {pageCount} 頁");
+                    
+                    // 處理每一頁
+                    for (int pageIndex = 0; pageIndex < pageCount; pageIndex++)
+                    {
+                        // 獲取頁面尺寸
+                        SizeF pageSize = document.PageSizes[pageIndex];
+                        
+                        // 計算圖像尺寸
+                        int width = (int)(pageSize.Width * scale);
+                        int height = (int)(pageSize.Height * scale);
+                        
+                        Console.WriteLine($"正在處理第 {pageIndex + 1} 頁，尺寸: {width}x{height}");
+                        
+                        // 渲染頁面為圖像
+                        using (Image image = document.Render(pageIndex, width, height, dpi, dpi, PdfRenderFlags.CorrectFromDpi))
+                        {
+                            // 創建輸出文件路徑
+                            string outputPath = Path.Combine(outputFolder, $"page-{pageIndex + 1}.png");
+                            
+                            // 保存為PNG
+                            image.Save(outputPath, ImageFormat.Png);
+                            
+                            Console.WriteLine($"已保存: {outputPath}");
+                        }
+                    }
+                    
+                    Console.WriteLine($"全部 {pageCount} 頁已轉換完成");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"轉換過程中發生錯誤: {ex.Message}");
+                throw;
+            }
+        }
+    }
+}
