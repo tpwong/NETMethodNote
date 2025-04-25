@@ -2,7 +2,10 @@ using System;
 using System.IO;
 using System.Drawing;
 using System.Drawing.Imaging;
-using Bblanchon.Pdfium;
+using iText.Kernel.Pdf;
+using iText.Kernel.Pdf.Canvas.Parser;
+using Ghostscript.NET;
+using Ghostscript.NET.Rasterizer;
 
 namespace PdfToPngConverter
 {
@@ -15,19 +18,19 @@ namespace PdfToPngConverter
             string outputFolder = @"C:\path\to\output\folder";  // 請替換為您的輸出目錄路徑
             
             // 調用轉換方法
-            ConvertPdfToPng(pdfPath, outputFolder);
+            ConvertPdfToPngUsingGhostscript(pdfPath, outputFolder);
             
             Console.WriteLine("轉換完成，按任意鍵退出...");
             Console.ReadKey();
         }
         
         /// <summary>
-        /// 使用Bblanchon.Pdfium將PDF文件轉換為PNG圖片
+        /// 使用Ghostscript將PDF文件轉換為PNG圖片，保留表格和表單文字
         /// </summary>
         /// <param name="pdfPath">PDF文件的路徑</param>
         /// <param name="outputFolder">輸出PNG圖片的文件夾路徑</param>
         /// <param name="dpi">輸出圖片的DPI值，預設為300</param>
-        public static void ConvertPdfToPng(string pdfPath, string outputFolder, int dpi = 300)
+        public static void ConvertPdfToPngUsingGhostscript(string pdfPath, string outputFolder, int dpi = 300)
         {
             // 檢查PDF文件是否存在
             if (!File.Exists(pdfPath))
@@ -41,82 +44,45 @@ namespace PdfToPngConverter
                 Directory.CreateDirectory(outputFolder);
             }
             
-            // 計算縮放系數 (PDF默認使用72 DPI)
-            float scale = dpi / 72f;
-            
             try
             {
-                // 初始化PDFium庫
-                Pdfium.Init();
-                
-                // 加載PDF文件
-                using (var document = new PdfDocument(pdfPath))
+                // 首先使用iText7獲取頁數
+                using (PdfReader reader = new PdfReader(pdfPath))
+                using (PdfDocument pdfDoc = new PdfDocument(reader))
                 {
-                    // 獲取PDF頁數
-                    int pageCount = document.Pages.Count;
+                    int pageCount = pdfDoc.GetNumberOfPages();
                     Console.WriteLine($"PDF文件共有 {pageCount} 頁");
                     
-                    // 處理每一頁
-                    for (int pageIndex = 0; pageIndex < pageCount; pageIndex++)
+                    // 然後使用Ghostscript進行渲染
+                    using (GhostscriptRasterizer rasterizer = new GhostscriptRasterizer())
                     {
-                        // 獲取頁面
-                        using (var page = document.Pages[pageIndex])
+                        // 加載PDF文件
+                        rasterizer.Open(pdfPath);
+                        
+                        // 處理每一頁
+                        for (int pageIndex = 1; pageIndex <= pageCount; pageIndex++)
                         {
-                            // 獲取頁面尺寸（點為單位）
-                            float widthInPoints = page.Width;
-                            float heightInPoints = page.Height;
+                            Console.WriteLine($"正在處理第 {pageIndex} 頁");
                             
-                            // 計算像素尺寸
-                            int width = (int)(widthInPoints * scale);
-                            int height = (int)(heightInPoints * scale);
-                            
-                            Console.WriteLine($"正在處理第 {pageIndex + 1} 頁，尺寸: {width}x{height}");
-                            
-                            // 創建位圖
-                            using (Bitmap bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+                            // 渲染頁面為圖像，使用指定的DPI
+                            using (Image image = rasterizer.GetPage(dpi, dpi, pageIndex))
                             {
-                                // 將位圖鎖定到系統內存中
-                                BitmapData bitmapData = bitmap.LockBits(
-                                    new Rectangle(0, 0, width, height),
-                                    ImageLockMode.ReadWrite,
-                                    PixelFormat.Format32bppArgb);
-                                
-                                try
+                                // 轉換為位圖
+                                using (Bitmap bitmap = new Bitmap(image))
                                 {
-                                    // 設置渲染標誌
-                                    var flags = RenderingFlags.Annotations |
-                                               RenderingFlags.LcdText |  // 使用LCD文字優化
-                                               RenderingFlags.PrintPreview; // 使用打印預覽模式
+                                    // 創建輸出文件路徑
+                                    string outputPath = Path.Combine(outputFolder, $"page-{pageIndex}.png");
                                     
-                                    // 渲染頁面到位圖
-                                    page.Render(
-                                        bitmapData.Scan0, 
-                                        width, 
-                                        height, 
-                                        bitmapData.Stride, 
-                                        scale,  // 使用DPI縮放比例
-                                        flags);
-                                }
-                                finally
-                                {
-                                    // 解鎖位圖
-                                    bitmap.UnlockBits(bitmapData);
-                                }
-                                
-                                // 創建輸出文件路徑
-                                string outputPath = Path.Combine(outputFolder, $"page-{pageIndex + 1}.png");
-                                
-                                // 使用高質量設置保存為PNG
-                                using (var encoderParams = new EncoderParameters(1))
-                                {
-                                    encoderParams.Param[0] = new EncoderParameter(Encoder.Quality, 100L);
-                                    ImageCodecInfo pngEncoder = GetEncoder(ImageFormat.Png);
+                                    // 保存為PNG，使用高質量設置
+                                    using (EncoderParameters encoderParams = new EncoderParameters(1))
+                                    {
+                                        encoderParams.Param[0] = new EncoderParameter(Encoder.Quality, 100L);
+                                        ImageCodecInfo pngEncoder = GetEncoder(ImageFormat.Png);
+                                        bitmap.Save(outputPath, pngEncoder, encoderParams);
+                                    }
                                     
-                                    // 保存圖像
-                                    bitmap.Save(outputPath, pngEncoder, encoderParams);
+                                    Console.WriteLine($"已保存: {outputPath}");
                                 }
-                                
-                                Console.WriteLine($"已保存: {outputPath}");
                             }
                         }
                     }
@@ -129,14 +95,11 @@ namespace PdfToPngConverter
                 Console.WriteLine($"轉換過程中發生錯誤: {ex.Message}");
                 throw;
             }
-            finally
-            {
-                // 釋放PDFium庫資源
-                Pdfium.Shutdown();
-            }
         }
         
-        // 獲取編碼器方法
+        /// <summary>
+        /// 獲取指定格式的編碼器
+        /// </summary>
         private static ImageCodecInfo GetEncoder(ImageFormat format)
         {
             ImageCodecInfo[] codecs = ImageCodecInfo.GetImageDecoders();
