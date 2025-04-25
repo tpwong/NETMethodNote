@@ -1,34 +1,134 @@
-// 安裝NuGet包：itext7, itext7.pdfrender
-using iText.Kernel.Pdf;
-using iText.Kernel.Pdf.Canvas.Parser;
-using iText.Pdfrender;
+using System;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
+using PdfiumViewer;
 
-public static void ConvertPdfToPngUsingIText7(string pdfPath, string outputFolder, int dpi = 300)
+namespace PdfToPngConverter
 {
-    if (!File.Exists(pdfPath))
-        throw new FileNotFoundException("找不到指定的PDF文件", pdfPath);
-    
-    if (!Directory.Exists(outputFolder))
-        Directory.CreateDirectory(outputFolder);
-    
-    using (PdfDocument pdfDoc = new PdfDocument(new PdfReader(pdfPath)))
+    class Program
     {
-        int pageCount = pdfDoc.GetNumberOfPages();
-        Console.WriteLine($"PDF文件共有 {pageCount} 頁");
-        
-        for (int i = 1; i <= pageCount; i++)
+        static void Main(string[] args)
         {
-            PdfPage page = pdfDoc.GetPage(i);
-            PdfRendererBuilder builder = new PdfRendererBuilder();
-            builder.Scale(dpi / 72f);
+            // 設置PDF路徑和輸出目錄
+            string pdfPath = @"C:\path\to\your\document.pdf";  // 請替換為您的PDF文件路徑
+            string outputFolder = @"C:\path\to\output\folder";  // 請替換為您的輸出目錄路徑
             
-            using (var renderer = builder.Build())
+            // 調用轉換方法
+            ConvertPdfToPng(pdfPath, outputFolder);
+            
+            Console.WriteLine("轉換完成，按任意鍵退出...");
+            Console.ReadKey();
+        }
+        
+        /// <summary>
+        /// 使用Bblanchon.PdfiumViewer將PDF文件轉換為PNG圖片
+        /// </summary>
+        /// <param name="pdfPath">PDF文件的路徑</param>
+        /// <param name="outputFolder">輸出PNG圖片的文件夾路徑</param>
+        /// <param name="dpi">輸出圖片的DPI值，預設為300</param>
+        public static void ConvertPdfToPng(string pdfPath, string outputFolder, int dpi = 300)
+        {
+            // 檢查PDF文件是否存在
+            if (!File.Exists(pdfPath))
             {
-                var image = renderer.RenderPageToImage(page);
-                string outputPath = Path.Combine(outputFolder, $"page-{i}.png");
-                image.Save(outputPath, System.Drawing.Imaging.ImageFormat.Png);
-                Console.WriteLine($"已保存: {outputPath}");
+                throw new FileNotFoundException("找不到指定的PDF文件", pdfPath);
             }
+            
+            // 確保輸出目錄存在
+            if (!Directory.Exists(outputFolder))
+            {
+                Directory.CreateDirectory(outputFolder);
+            }
+            
+            // 計算縮放系數 (PDF默認使用72 DPI)
+            float scale = dpi / 72f;
+            
+            try
+            {
+                // 確保PDFium庫初始化
+                PdfiumViewer.PdfLibrary.EnsureLoaded();
+                
+                // 使用pdfium庫加載文件
+                using (var fileStream = new FileStream(pdfPath, FileMode.Open, FileAccess.Read))
+                using (var pdfDocument = PdfiumViewer.PdfDocument.Load(fileStream))
+                {
+                    // 獲取PDF頁數
+                    int pageCount = pdfDocument.PageCount;
+                    Console.WriteLine($"PDF文件共有 {pageCount} 頁");
+
+                    // 處理每一頁
+                    for (int pageIndex = 0; pageIndex < pageCount; pageIndex++)
+                    {
+                        // 獲取頁面尺寸
+                        var pageSize = pdfDocument.PageSizes[pageIndex];
+                        
+                        // 計算圖像尺寸
+                        int width = (int)(pageSize.Width * scale);
+                        int height = (int)(pageSize.Height * scale);
+                        
+                        Console.WriteLine($"正在處理第 {pageIndex + 1} 頁，尺寸: {width}x{height}");
+                        
+                        // 設置更強的渲染選項
+                        var renderFlags = PdfRenderFlags.Annotations | 
+                                          PdfRenderFlags.CorrectFromDpi | 
+                                          PdfRenderFlags.Printing |
+                                          PdfRenderFlags.LcdText;
+                        
+                        // 渲染頁面為圖像
+                        using (var image = pdfDocument.Render(pageIndex, width, height, dpi, dpi, renderFlags))
+                        {
+                            // 創建位圖以提高質量
+                            using (var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+                            {
+                                using (var graphics = Graphics.FromImage(bitmap))
+                                {
+                                    // 設置高質量繪圖
+                                    graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
+                                    graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                                    graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+                                    graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+                                    
+                                    // 繪製原始圖像到位圖
+                                    graphics.DrawImage(image, 0, 0, width, height);
+                                }
+                                
+                                // 創建輸出文件路徑
+                                string outputPath = Path.Combine(outputFolder, $"page-{pageIndex + 1}.png");
+                                
+                                // 保存為PNG，使用高質量設置
+                                var encoderParams = new EncoderParameters(1);
+                                encoderParams.Param[0] = new EncoderParameter(Encoder.Quality, 100L);
+                                ImageCodecInfo pngEncoder = GetEncoder(ImageFormat.Png);
+                                
+                                bitmap.Save(outputPath, pngEncoder, encoderParams);
+                                Console.WriteLine($"已保存: {outputPath}");
+                            }
+                        }
+                    }
+                    
+                    Console.WriteLine($"全部 {pageCount} 頁已轉換完成");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"轉換過程中發生錯誤: {ex.Message}");
+                throw;
+            }
+        }
+        
+        // 獲取編碼器方法
+        private static ImageCodecInfo GetEncoder(ImageFormat format)
+        {
+            ImageCodecInfo[] codecs = ImageCodecInfo.GetImageDecoders();
+            foreach (ImageCodecInfo codec in codecs)
+            {
+                if (codec.FormatID == format.Guid)
+                {
+                    return codec;
+                }
+            }
+            return null;
         }
     }
 }
