@@ -8,102 +8,102 @@ namespace PdfToPngConverter
     {
         static void Main(string[] args)
         {
-            // 設置PDF路徑和輸出目錄
-            string pdfPath = @"C:\Users\tpwong\Desktop\406.pdf";  // 你的PDF文件路徑
-            string outputFolder = @"C:\Users\tpwong\Desktop";  // 你的輸出目錄路徑
+            // Set PDF path and output directory
+            string pdfPath = @"C:\Users\tpwong\Desktop\406.pdf";  // Path to your PDF file
+            string outputFolder = @"C:\Users\tpwong\Desktop";     // Path to your output directory
 
             try
             {
-                // 調用轉換方法
+                // Call the conversion method
                 ConvertPdfToPngUsingPdfium(pdfPath, outputFolder);
-                Console.WriteLine("轉換完成，按任意鍵退出...");
+                Console.WriteLine("Conversion completed, press any key to exit...");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"發生錯誤: {ex.Message}");
-                Console.WriteLine($"堆棧跟踪: {ex.StackTrace}");
+                Console.WriteLine($"Error occurred: {ex.Message}");
+                Console.WriteLine($"Stack trace: {ex.StackTrace}");
             }
 
             Console.ReadKey();
         }
 
         /// <summary>
-        /// 使用PdfiumViewer將PDF文件轉換為PNG圖片
+        /// Convert PDF file to PNG images using PdfiumViewer
         /// </summary>
-        public static void ConvertPdfToPngUsingPdfium(string pdfPath, string outputFolder, int dpi = 450)
+        public static void ConvertPdfToPngUsingPdfium(string pdfPath, string outputFolder, int dpi = 300)
         {
-            // 檢查PDF文件是否存在
+            // Check if the PDF file exists
             if (!File.Exists(pdfPath))
             {
-                throw new FileNotFoundException("找不到指定的PDF文件", pdfPath);
+                throw new FileNotFoundException("The specified PDF file could not be found", pdfPath);
             }
 
-            // 確保輸出目錄存在
+            // Ensure the output directory exists
             if (!Directory.Exists(outputFolder))
             {
                 Directory.CreateDirectory(outputFolder);
             }
 
-            // 計算縮放系數 (PDF默認使用72 DPI)
+            // Calculate scaling factor (PDF default is 72 DPI)
             float scale = dpi / 72f;
 
             try
             {
-                // 使用PdfiumViewer讀取PDF文件
+                // Load PDF file using PdfiumViewer
                 using (var document = PdfDocument.Load(pdfPath))
                 {
-                    // 獲取PDF頁數
+                    // Get the number of pages in the PDF
                     int pageCount = document.PageCount;
-                    Console.WriteLine($"PDF文件共有 {pageCount} 頁");
+                    Console.WriteLine($"PDF file has {pageCount} pages");
 
-                    // 處理每一頁
+                    // Process each page
                     for (int pageIndex = 0; pageIndex < pageCount; pageIndex++)
                     {
-                        Console.WriteLine($"正在處理第 {pageIndex + 1} 頁");
+                        Console.WriteLine($"Processing page {pageIndex + 1}");
 
-                        // 獲取頁面尺寸
+                        // Get page dimensions
                         var pageSize = document.PageSizes[pageIndex];
 
-                        // 計算圖像尺寸
+                        // Calculate image dimensions
                         int width = (int)(pageSize.Width * scale);
                         int height = (int)(pageSize.Height * scale);
 
-                        // 設置渲染標誌
+                        // Set rendering flags
                         var renderFlags = PdfRenderFlags.Annotations |
                                           PdfRenderFlags.CorrectFromDpi |
-                                          PdfRenderFlags.ForPrinting |       // 使用打印模式
-                                          PdfRenderFlags.LcdText;         // 使用LCD優化的文字
+                                          PdfRenderFlags.ForPrinting |    // Use print mode
+                                          PdfRenderFlags.LcdText;         // Use LCD-optimized text rendering
 
-                        // 渲染頁面
+                        // Render the page
                         using (var image = document.Render(pageIndex, width, height, dpi, dpi, renderFlags))
                         {
-                            // 創建較高質量的圖像
+                            // Create a high-quality image
                             using (var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb))
                             {
                                 using (var g = Graphics.FromImage(bitmap))
                                 {
-                                    // 設置高質量繪圖
+                                    // Set high-quality drawing options
                                     g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
                                     g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
                                     g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
                                     g.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
 
-                                    // 繪製白色背景（確保表單清晰可見）
+                                    // Draw a white background (ensures form elements are clearly visible)
                                     g.Clear(Color.White);
 
-                                    // 繪製渲染的PDF頁面
+                                    // Draw the rendered PDF page
                                     g.DrawImage(image, 0, 0, width, height);
                                 }
 
-                                // 保存為PNG
+                                // Save as PNG
                                 string outputPath = Path.Combine(outputFolder, $"page-{pageIndex + 1}.png");
 
-                                // 使用高質量設置保存
+                                // Use high-quality settings for saving
                                 var encoderParameters = new EncoderParameters(1);
                                 encoderParameters.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, Convert.ToByte(100));
                                 bitmap.Save(outputPath, GetEncoder(ImageFormat.Png), encoderParameters);
 
-                                Console.WriteLine($"已保存: {outputPath}");
+                                Console.WriteLine($"Saved: {outputPath}");
                             }
                         }
                     }
@@ -111,12 +111,12 @@ namespace PdfToPngConverter
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"轉換過程中發生錯誤: {ex.Message}");
+                Console.WriteLine($"Error during conversion process: {ex.Message}");
                 throw;
             }
         }
 
-        // 獲取指定格式的編碼器
+        // Get the encoder for the specified image format
         private static ImageCodecInfo GetEncoder(ImageFormat format)
         {
             ImageCodecInfo[] codecs = ImageCodecInfo.GetImageDecoders();
