@@ -44,31 +44,48 @@ public class BucketBalanceRepository
         var amounts = balances.Select(b => b.Amount).ToArray();
 
         const string sql = @"
+            WITH input_rows AS (
+                SELECT 
+                    a.acct, 
+                    a.bucket_name, 
+                    a.bucket_type, 
+                    a.expiry_date, 
+                    a.amount
+                FROM unnest(
+                    @Accts,
+                    @BucketNames,
+                    @BucketTypes,
+                    @ExpiryDates,
+                    @Amounts
+                ) AS a(acct, bucket_name, bucket_type, expiry_date, amount)
+            )
             INSERT INTO bucket_balances as b (acct, bucket_name, bucket_type, expiry_date, total)
             SELECT 
-                a.acct, 
-                a.bucket_name, 
-                a.bucket_type, 
-                a.expiry_date, 
-                a.amount
-            FROM unnest(
-                @Accts,      -- acct 数组
-                @BucketNames,      -- bucket_name 数组
-                @BucketTypes,      -- bucket_type 数组
-                @ExpiryDates, -- expiry_date 数组
-                @Amounts    -- amount 数组
-            ) AS a(acct, bucket_name, bucket_type, expiry_date, amount)
+                i.acct, 
+                i.bucket_name, 
+                i.bucket_type, 
+                i.expiry_date, 
+                i.amount
+            FROM input_rows i
             ON CONFLICT ON CONSTRAINT u_bucket_balances
             DO UPDATE SET
                 total = b.total + excluded.total,
                 last_modified_date = CURRENT_TIMESTAMP
             RETURNING 
-                acct, 
-                bucket_type, 
-                expiry_date,
-                total - excluded.total as before_total, 
-                excluded.total as sum_with,
-                total";
+                b.acct, 
+                b.bucket_type, 
+                b.expiry_date,
+                b.total - (SELECT amount FROM input_rows WHERE 
+                          input_rows.acct = b.acct AND 
+                          input_rows.bucket_name = b.bucket_name AND 
+                          input_rows.bucket_type = b.bucket_type AND 
+                          input_rows.expiry_date = b.expiry_date) as before_total, 
+                (SELECT amount FROM input_rows WHERE 
+                          input_rows.acct = b.acct AND 
+                          input_rows.bucket_name = b.bucket_name AND 
+                          input_rows.bucket_type = b.bucket_type AND 
+                          input_rows.expiry_date = b.expiry_date) as sum_with,
+                b.total";
 
         using (var connection = new NpgsqlConnection(_connectionString))
         {
