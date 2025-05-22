@@ -106,3 +106,61 @@ public class BucketBalanceRepository
         }
     }
 }
+
+
+
+
+// 收集数据
+var accts = adjustTransactionExpiries.Select(b => b.Acct).ToArray();
+var gamingDts = adjustTransactionExpiries.Select(b => b.GamingDt).ToArray();
+var bucketNames = adjustTransactionExpiries.Select(b => b.BucketName).ToArray();
+var bucketTypes = adjustTransactionExpiries.Select(b => b.BucketType).ToArray();
+var amounts = adjustTransactionExpiries.Select(b => b.Amount).ToArray();
+var totals = audits.Select(a => a?.Total ?? 0M).ToArray(); // 假设audits和adjustTransactionExpiries有相同的顺序
+var relatedIds = adjustTransactionExpiries.Select(b => b.RelatedId).ToArray();
+var remarks = adjustTransactionExpiries.Select(b => b.Remark).ToArray();
+
+// 定义批量插入SQL
+const string insertStmt = @"
+-- insert adjust bucket transaction
+INSERT INTO bucket_adjust_transactions (acct, gaming_dt, bucket_name, bucket_type, amount, after_adjust_amount, related_id, remark)
+SELECT 
+    a.acct, 
+    a.gaming_dt, 
+    a.bucket_name, 
+    a.bucket_type, 
+    a.amount, 
+    a.after_adjust_amount, 
+    a.related_id, 
+    a.remark
+FROM unnest(
+    @Accts,
+    @GamingDts,
+    @BucketNames,
+    @BucketTypes,
+    @Amounts,
+    @Totals,
+    @RelatedIds,
+    @Remarks
+) AS a(acct, gaming_dt, bucket_name, bucket_type, amount, after_adjust_amount, related_id, remark)
+RETURNING id, acct, gaming_dt, bucket_name, bucket_type, amount, after_adjust_amount, post_dtm, related_id, remark, is_void";
+
+// 执行批量插入
+var adjustTransactions = await dbConnection.QueryAsync<AdjustTransaction>(
+    insertStmt, 
+    new {
+        Accts = accts,
+        GamingDts = gamingDts,
+        BucketNames = bucketNames,
+        BucketTypes = bucketTypes,
+        Amounts = amounts,
+        Totals = totals, // 使用从audits获取的Total作为after_adjust_amount
+        RelatedIds = relatedIds,
+        Remarks = remarks
+    }, 
+    transaction);
+
+// 如果只需要第一个结果
+var adjustTransaction = adjustTransactions.FirstOrDefault();
+
+
