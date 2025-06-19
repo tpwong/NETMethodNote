@@ -1,219 +1,60 @@
-public class SoapRoutingMiddleware
+看到了您的代码，我现在能更具体地理解您的问题了。在您的 `RetainServiceWorker` 类中，您使用了多个 `GetKeyedService` 调用，例如：
+
+```csharp
+if (_serviceProvider.GetKeyedService<string[]>("participants") is string[] participants)
 {
-    private readonly RequestDelegate _next;
-    private readonly ILogger<SoapRoutingMiddleware> _logger;
-    private readonly IHttpClientFactory _httpClientFactory;
-
-    // 目標端點配置
-    private readonly Dictionary<string, string> _qaEndpoints = new()
-    {
-        { "NameService", "http://172.18.51.181:6550/NameService.asmx" },
-        { "ReservationService", "http://172.18.51.181:6550/ReservationService.asmx" },
-        { "GamingService", "http://172.18.51.181:6550/GamingService.asmx" }
-    };
-
-    private readonly Dictionary<string, string> _prodEndpoints = new()
-    {
-        { "NameService", "http://10.88.64.81:8009/NameService.asmx" },
-        { "ReservationService", "http://10.88.64.81:8009/ReservationService.asmx" },
-        { "GamingService", "http://10.88.64.81:8009/GamingService.asmx" }
-    };
-
-    // 特殊路由規則 - 需要轉發到自定義服務A的SOAP操作清單
-    private readonly HashSet<string> _specialRoutingOperations = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "GetPlayerInfo",
-        "CheckPlayerStatus",
-        "UpdatePlayerProfile"
-        // 添加其他需要特殊處理的SOAP操作
-    };
-
-    // 自定義服務A的端點
-    private const string CustomServiceAEndpoint = "http://custom-service-a-endpoint/api/soap";
-
-    public SoapRoutingMiddleware(RequestDelegate next, ILogger<SoapRoutingMiddleware> logger, IHttpClientFactory httpClientFactory)
-    {
-        _next = next;
-        _logger = logger;
-        _httpClientFactory = httpClientFactory;
-    }
-
-    public async Task InvokeAsync(HttpContext context)
-    {
-        // 僅處理POST請求且包含SOAP內容
-        if (context.Request.Method == "POST" && 
-            (context.Request.ContentType?.Contains("text/xml") == true || 
-             context.Request.ContentType?.Contains("application/soap+xml") == true))
-        {
-            // 緩存請求體，以便可以多次讀取
-            context.Request.EnableBuffering();
-            
-            // 讀取請求體
-            string requestBody;
-            using (var reader = new StreamReader(context.Request.Body, Encoding.UTF8, leaveOpen: true))
-            {
-                requestBody = await reader.ReadToEndAsync();
-                // 重置流位置以允許後續讀取
-                context.Request.Body.Position = 0;
-            }
-
-            // 解析SOAP請求以確定服務和操作
-            var (serviceName, operationName) = ParseSoapRequest(requestBody);
-            _logger.LogInformation($"SOAP Request: Service={serviceName}, Operation={operationName}");
-
-            // 決定目標端點
-            string targetEndpoint;
-            
-            if (_specialRoutingOperations.Contains(operationName))
-            {
-                // 特殊路由 - 發送到自定義服務A
-                targetEndpoint = CustomServiceAEndpoint;
-                _logger.LogInformation($"Routing to custom service A: {targetEndpoint}");
-            }
-            else
-            {
-                // 常規路由 - 基於URL路徑確定使用QA還是生產環境
-                var pathSegments = context.Request.Path.Value?.Split('/', StringSplitOptions.RemoveEmptyEntries);
-                bool useProduction = pathSegments?.Any(s => s.Equals("prod", StringComparison.OrdinalIgnoreCase)) == true;
-
-                var endpoints = useProduction ? _prodEndpoints : _qaEndpoints;
-                
-                if (!endpoints.TryGetValue(serviceName, out targetEndpoint))
-                {
-                    // 默認使用第一個服務
-                    targetEndpoint = endpoints.FirstOrDefault().Value ?? 
-                        (useProduction ? _prodEndpoints.FirstOrDefault().Value : _qaEndpoints.FirstOrDefault().Value);
-                }
-                
-                _logger.LogInformation($"Routing to {(useProduction ? "PROD" : "QA")} endpoint: {targetEndpoint}");
-            }
-
-            // 轉發請求到目標端點
-            await ForwardRequestAsync(context, targetEndpoint, requestBody);
-            return;
-        }
-
-        // 非SOAP請求，繼續處理管道
-        await _next(context);
-    }
-
-    private (string ServiceName, string OperationName) ParseSoapRequest(string soapXml)
-    {
-        try
-        {
-            // 創建XML文檔
-            var doc = new XmlDocument();
-            doc.LoadXml(soapXml);
-
-            // 定義命名空間管理器處理SOAP命名空間
-            var nsManager = new XmlNamespaceManager(doc.NameTable);
-            nsManager.AddNamespace("soap", "http://schemas.xmlsoap.org/soap/envelope/");
-            nsManager.AddNamespace("soap12", "http://www.w3.org/2003/05/soap-envelope");
-
-            // 嘗試查找SOAP Body
-            XmlNode bodyNode = doc.SelectSingleNode("//soap:Body", nsManager) ?? 
-                               doc.SelectSingleNode("//soap12:Body", nsManager) ?? 
-                               doc.SelectSingleNode("//Body", nsManager);
-
-            if (bodyNode == null || !bodyNode.HasChildNodes)
-            {
-                return ("Unknown", "Unknown");
-            }
-
-            // 獲取第一個子節點作為操作節點
-            XmlNode operationNode = bodyNode.FirstChild;
-            
-            // 從URL或操作名稱推斷服務名稱
-            string serviceName = "Unknown";
-            
-            // 從SOAP操作名稱中推斷服務
-            string operationName = operationNode.LocalName;
-            if (operationName.Contains("Name"))
-                serviceName = "NameService";
-            else if (operationName.Contains("Reservation") || operationName.Contains("Booking"))
-                serviceName = "ReservationService";
-            else if (operationName.Contains("Gaming") || operationName.Contains("Game") || operationName.Contains("Player"))
-                serviceName = "GamingService";
-            
-            return (serviceName, operationName);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error parsing SOAP request");
-            return ("Unknown", "Unknown");
-        }
-    }
-
-    private async Task ForwardRequestAsync(HttpContext context, string targetEndpoint, string requestBody)
-    {
-        try
-        {
-            // 創建HTTP客戶端
-            var client = _httpClientFactory.CreateClient("SoapForwarder");
-            
-            // 準備請求
-            var request = new HttpRequestMessage(HttpMethod.Post, targetEndpoint)
-            {
-                Content = new StringContent(requestBody, Encoding.UTF8, context.Request.ContentType)
-            };
-
-            // 複製原始請求頭
-            foreach (var header in context.Request.Headers)
-            {
-                if (!header.Key.Equals("Host", StringComparison.OrdinalIgnoreCase) &&
-                    !header.Key.Equals("Content-Length", StringComparison.OrdinalIgnoreCase) &&
-                    !header.Key.Equals("Content-Type", StringComparison.OrdinalIgnoreCase))
-                {
-                    request.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
-                }
-            }
-
-            // 添加SOAP Action如果存在
-            if (context.Request.Headers.TryGetValue("SOAPAction", out var soapAction))
-            {
-                request.Headers.TryAddWithoutValidation("SOAPAction", soapAction.ToArray());
-            }
-
-            // 發送請求
-            var response = await client.SendAsync(request);
-            
-            // 讀取響應
-            var responseContent = await response.Content.ReadAsStringAsync();
-            
-            // 設置響應狀態碼
-            context.Response.StatusCode = (int)response.StatusCode;
-            
-            // 複製響應頭
-            foreach (var header in response.Headers)
-            {
-                context.Response.Headers[header.Key] = header.Value.ToArray();
-            }
-
-            foreach (var header in response.Content.Headers)
-            {
-                context.Response.Headers[header.Key] = header.Value.ToArray();
-            }
-            
-            // 寫入響應體
-            context.Response.ContentType = response.Content.Headers.ContentType?.ToString() ?? "text/xml";
-            await context.Response.WriteAsync(responseContent);
-            
-            _logger.LogInformation($"Request forwarded successfully to {targetEndpoint}. Status: {response.StatusCode}");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, $"Error forwarding request to {targetEndpoint}");
-            context.Response.StatusCode = 500;
-            await context.Response.WriteAsync($"Error processing SOAP request: {ex.Message}");
-        }
-    }
+    var isBlackOrWhiteList = _serviceProvider.GetKeyedService<string>("isBlackOrWhiteList");
+    // ...
 }
+```
 
-// 中間件擴展方法
-public static class SoapRoutingMiddlewareExtensions
-{
-    public static IApplicationBuilder UseSoapRouting(this IApplicationBuilder builder)
-    {
-        return builder.UseMiddleware<SoapRoutingMiddleware>();
-    }
-}
+在单元测试中，您需要模拟这些带键的服务。基于您的代码，您应该这样设置mock：
+
+```csharp
+// 创建ServiceProvider的mock
+var mockServiceProvider = new Mock<IServiceProvider>();
+
+// 模拟"participants"键的服务
+string[] mockParticipants = new[] { "participant1", "participant2" };
+mockServiceProvider
+    .Setup(sp => sp.GetKeyedService(typeof(string[]), "participants"))
+    .Returns(mockParticipants);
+
+// 模拟"isBlackOrWhiteList"键的服务
+string mockListType = "white"; // 或 "black"，取决于您的测试需求
+mockServiceProvider
+    .Setup(sp => sp.GetKeyedService(typeof(string), "isBlackOrWhiteList"))
+    .Returns(mockListType);
+```
+
+注意，尽管在代码中您使用了泛型方法 `GetKeyedService<T>`，但实际上在底层这会被转换为非泛型的 `GetKeyedService(Type, object)`。所以您需要模拟这个非泛型方法。
+
+如果您使用的是.NET 8或更高版本，可能需要实现 `IKeyedServiceProvider` 接口而不是简单的 `IServiceProvider`：
+
+```csharp
+var mockServiceProvider = new Mock<IKeyedServiceProvider>();
+
+mockServiceProvider
+    .Setup(sp => sp.GetKeyedService(typeof(string[]), "participants"))
+    .Returns(mockParticipants);
+
+mockServiceProvider
+    .Setup(sp => sp.GetKeyedService(typeof(string), "isBlackOrWhiteList"))
+    .Returns(mockListType);
+```
+
+确保您的RetainServiceWorker类在构造函数中接收这个模拟的服务提供者，例如：
+
+```csharp
+// 在测试中实例化您的服务
+var worker = new RetainServiceWorker(
+    mockServiceProvider.Object, 
+    mockLogger.Object, 
+    mockQueryDatawarehDbContext.Object,
+    mockApiClient.Object);
+
+// 然后测试Invoke方法
+await worker.Invoke();
+```
+
+这样应该能解决您的单元测试中的错误问题。
