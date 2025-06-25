@@ -1,60 +1,125 @@
-看到了您的代码，我现在能更具体地理解您的问题了。在您的 `RetainServiceWorker` 类中，您使用了多个 `GetKeyedService` 调用，例如：
+是的，在 YARP 中，您可以透過設定 `destinationPrefix` (baseUrl) 和自定義路徑來達成您的需求。有兩種主要方式可以實現：
+
+### 方法一：使用 SendAsync 直接轉發
 
 ```csharp
-if (_serviceProvider.GetKeyedService<string[]>("participants") is string[] participants)
+public async Task ProcessRequest(HttpContext context)
 {
-    var isBlackOrWhiteList = _serviceProvider.GetKeyedService<string>("isBlackOrWhiteList");
-    // ...
+    // 1. 基礎 URL
+    string baseUrl = "https://api.example.com";
+    
+    // 2. 函數的特定端點
+    string functionEndpoint = "/api/function";
+    
+    // 合併成完整的目標 URL
+    string destinationUrl = baseUrl + functionEndpoint;
+    
+    // 建立 HttpClient
+    var httpClient = new HttpMessageInvoker(new SocketsHttpHandler()
+    {
+        UseProxy = false,
+        AllowAutoRedirect = false,
+        AutomaticDecompression = DecompressionMethods.None,
+        UseCookies = false
+    });
+    
+    // 配置轉發請求
+    var requestConfig = new ForwarderRequestConfig { Timeout = TimeSpan.FromSeconds(100) };
+    
+    // 建立自定義轉換器，用於設定目標 URL
+    var transformer = new CustomTransformer(functionEndpoint);
+    
+    // 執行轉發
+    await context.ForwardAsync(destinationUrl, httpClient, requestConfig, transformer);
+}
+
+// 自定義轉換器
+public class CustomTransformer : HttpTransformer
+{
+    private readonly string _functionEndpoint;
+    
+    public CustomTransformer(string functionEndpoint)
+    {
+        _functionEndpoint = functionEndpoint;
+    }
+    
+    public override ValueTask TransformRequestAsync(HttpContext httpContext, HttpRequestMessage proxyRequest, string destinationPrefix)
+    {
+        // 將請求直接指向目標 URL，忽略原始路徑
+        proxyRequest.RequestUri = new Uri(destinationPrefix);
+        
+        return base.TransformRequestAsync(httpContext, proxyRequest, destinationPrefix);
+    }
 }
 ```
 
-在单元测试中，您需要模拟这些带键的服务。基于您的代码，您应该这样设置mock：
+### 方法二：使用 YARP 配置方式
+
+在 `Program.cs` 或 `Startup.cs` 中：
 
 ```csharp
-// 创建ServiceProvider的mock
-var mockServiceProvider = new Mock<IServiceProvider>();
+public void ConfigureServices(IServiceCollection services)
+{
+    // 添加 YARP 服務
+    services.AddReverseProxy()
+        .LoadFromConfig(Configuration.GetSection("ReverseProxy"));
+}
 
-// 模拟"participants"键的服务
-string[] mockParticipants = new[] { "participant1", "participant2" };
-mockServiceProvider
-    .Setup(sp => sp.GetKeyedService(typeof(string[]), "participants"))
-    .Returns(mockParticipants);
-
-// 模拟"isBlackOrWhiteList"键的服务
-string mockListType = "white"; // 或 "black"，取决于您的测试需求
-mockServiceProvider
-    .Setup(sp => sp.GetKeyedService(typeof(string), "isBlackOrWhiteList"))
-    .Returns(mockListType);
+public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
+{
+    // 其他中間件配置...
+    
+    // 使用 YARP
+    app.UseEndpoints(endpoints =>
+    {
+        endpoints.MapReverseProxy(proxyPipeline =>
+        {
+            // 自定義轉發邏輯
+            proxyPipeline.Use((context, next) =>
+            {
+                // 覆蓋路由配置
+                var routeConfig = context.Features.Get<IReverseProxyFeature>().Route.Config;
+                
+                // 使用自定義的 transformer
+                context.Features.Set<IHttpTransformer>(new CustomTransformer("/api/function"));
+                
+                return next();
+            });
+        });
+    });
+}
 ```
 
-注意，尽管在代码中您使用了泛型方法 `GetKeyedService<T>`，但实际上在底层这会被转换为非泛型的 `GetKeyedService(Type, object)`。所以您需要模拟这个非泛型方法。
+然後在 `appsettings.json` 中：
 
-如果您使用的是.NET 8或更高版本，可能需要实现 `IKeyedServiceProvider` 接口而不是简单的 `IServiceProvider`：
-
-```csharp
-var mockServiceProvider = new Mock<IKeyedServiceProvider>();
-
-mockServiceProvider
-    .Setup(sp => sp.GetKeyedService(typeof(string[]), "participants"))
-    .Returns(mockParticipants);
-
-mockServiceProvider
-    .Setup(sp => sp.GetKeyedService(typeof(string), "isBlackOrWhiteList"))
-    .Returns(mockListType);
+```json
+{
+  "ReverseProxy": {
+    "Routes": {
+      "route1": {
+        "ClusterId": "cluster1",
+        "Match": {
+          "Path": "{**catch-all}"
+        }
+      }
+    },
+    "Clusters": {
+      "cluster1": {
+        "Destinations": {
+          "destination1": {
+            "Address": "https://api.example.com"
+          }
+        }
+      }
+    }
+  }
+}
 ```
 
-确保您的RetainServiceWorker类在构造函数中接收这个模拟的服务提供者，例如：
+這兩種方法都能讓您：
+1. 設定基礎 URL (`baseUrl`)
+2. 指定函數端點 (`functionEndpoint`)
 
-```csharp
-// 在测试中实例化您的服务
-var worker = new RetainServiceWorker(
-    mockServiceProvider.Object, 
-    mockLogger.Object, 
-    mockQueryDatawarehDbContext.Object,
-    mockApiClient.Object);
+然後將請求直接轉發到完整的目標 URL，而不考慮原始請求的路徑。
 
-// 然后测试Invoke方法
-await worker.Invoke();
-```
-
-这样应该能解决您的单元测试中的错误问题。
+您可以根據您的具體需求選擇最適合的方式。
