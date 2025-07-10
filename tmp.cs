@@ -1,134 +1,464 @@
-INSERT INTO OPENQUERY(CO_GEGCRM, 'SELECT acct, gaming_dt, bucket_name, bucket_type, amount, post_dtm, related_id, remark, is_void FROM earning.bucket_adjust_transactions WHERE 1=0')
-VALUES
-('21008455', '2025-07-05', 'PyDollar_Base', 'Dollar', 22.096600000, '2025-07-05 04:14:43', '7123912355', 'Initial migrate from hub', 0)
+# 簡單直接的串行日誌記錄實現
 
+既然您希望直接在 Program.cs 中實現最小化的日誌記錄功能，不想建立額外的服務類，下面提供兩種直接嵌入到 Program.cs 的簡潔實現：
 
+## 方案一：最簡單的靜態方法實現
 
+```csharp
+using System;
+using System.IO;
+using System.Text;
 
--- 變數聲明
-DECLARE @BatchSize INT = 20000           -- 每批處理的記錄數
-DECLARE @TotalRecords INT                -- 總記錄數
-DECLARE @ProcessedRecords INT = 0        -- 已處理的記錄數
-DECLARE @BatchNumber INT = 0             -- 當前批次號
-DECLARE @StartTime DATETIME              -- 開始時間
-DECLARE @EndTime DATETIME                -- 結束時間
-DECLARE @TotalTime INT                   -- 總耗時(秒)
-DECLARE @ErrorMessage NVARCHAR(4000)     -- 錯誤訊息
+class Program
+{
+    // 設置日誌文件路徑（可根據需要調整）
+    private static readonly string LogFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SerialLog.txt");
+    private static readonly object LogLock = new object();
 
--- 獲取總記錄數
-SELECT @TotalRecords = COUNT(*) 
-FROM YourSourceTable
-WHERE YourConditions
+    static void Main(string[] args)
+    {
+        // 應用程序啟動記錄
+        LogToFile("應用程序已啟動");
 
--- 記錄開始時間
-SET @StartTime = GETDATE()
-PRINT '開始批量插入作業: ' + CONVERT(VARCHAR, @StartTime, 120)
-PRINT '總記錄數: ' + CAST(@TotalRecords AS VARCHAR)
-
--- 創建臨時表來存儲批次處理的ID範圍
-CREATE TABLE #BatchRanges (
-    BatchID INT IDENTITY(1,1),
-    StartID INT,
-    EndID INT
-)
-
--- 假設有一個ID欄位用於分批 (如果沒有，可以使用ROW_NUMBER())
--- 填充批次範圍表
-;WITH Numbered AS (
-    SELECT 
-        ROW_NUMBER() OVER (ORDER BY ID) AS RowNum, -- 替換ID為實際的唯一標識符
-        ID
-    FROM 
-        YourSourceTable
-    WHERE 
-        YourConditions
-)
-INSERT INTO #BatchRanges (StartID, EndID)
-SELECT 
-    MIN(ID) AS StartID,
-    MAX(ID) AS EndID
-FROM 
-    Numbered
-GROUP BY 
-    (RowNum - 1) / @BatchSize
-
--- 獲取批次總數
-DECLARE @TotalBatches INT
-SELECT @TotalBatches = COUNT(*) FROM #BatchRanges
-
--- 批量處理循環
-WHILE @BatchNumber < @TotalBatches
-BEGIN
-    BEGIN TRY
-        SET @BatchNumber = @BatchNumber + 1
+        try
+        {
+            // 模擬串口操作
+            LogToFile("嘗試打開串口 COM3");
+            
+            // 模擬收到數據
+            byte[] receivedData = new byte[] { 0x01, 0x02, 0x03, 0x04, 0xFF };
+            LogHexToFile(receivedData, "收到數據");
+            
+            // 模擬發送數據
+            byte[] sentData = new byte[] { 0xAA, 0xBB, 0xCC };
+            LogHexToFile(sentData, "發送數據");
+            
+            // 模擬錯誤情況
+            LogToFile("串口通信超時", isError: true);
+        }
+        catch (Exception ex)
+        {
+            LogToFile($"發生錯誤: {ex.Message}", isError: true);
+        }
         
-        DECLARE @StartID INT, @EndID INT
-        SELECT @StartID = StartID, @EndID = EndID 
-        FROM #BatchRanges 
-        WHERE BatchID = @BatchNumber
+        LogToFile("應用程序已關閉");
         
-        PRINT '處理批次 ' + CAST(@BatchNumber AS VARCHAR) + ' 共 ' + CAST(@TotalBatches AS VARCHAR) + 
-              ' 批次 (ID 範圍: ' + CAST(@StartID AS VARCHAR) + ' - ' + CAST(@EndID AS VARCHAR) + ')'
-        
-        -- 執行批量插入
-        INSERT INTO OPENQUERY(CO_GEGCRM, 
-            'SELECT acct, gaming_dt, bucket_name, bucket_type, amount, post_dtm, related_id, remark, is_void 
-             FROM earning.bucket_adjust_transactions WHERE 1=0')
-        SELECT 
-            account_number,
-            CONVERT(VARCHAR(10), gaming_date, 120),
-            bucket_name,
-            bucket_type,
-            amount,
-            CONVERT(VARCHAR(19), post_datetime, 120),
-            related_id,
-            remark,
-            CASE WHEN is_void = 1 THEN 1 ELSE 0 END
-        FROM 
-            YourSourceTable
-        WHERE 
-            ID BETWEEN @StartID AND @EndID
-            AND YourConditions
-        
-        -- 更新進度
-        SET @ProcessedRecords = @ProcessedRecords + 
-            (SELECT COUNT(*) FROM YourSourceTable WHERE ID BETWEEN @StartID AND @EndID AND YourConditions)
-        
-        -- 顯示進度
-        PRINT '完成批次 ' + CAST(@BatchNumber AS VARCHAR) + 
-              ', 已處理: ' + CAST(@ProcessedRecords AS VARCHAR) + 
-              ' 筆資料 (' + CAST(ROUND((@ProcessedRecords * 100.0 / @TotalRecords), 2) AS VARCHAR) + '%)'
-        
-        -- 可選: 添加小延遲，避免過度負載
-        WAITFOR DELAY '00:00:00.5'
-    END TRY
-    BEGIN CATCH
-        SET @ErrorMessage = 
-            '批次 ' + CAST(@BatchNumber AS VARCHAR) + ' 處理錯誤: ' + 
-            ERROR_MESSAGE() + ' (錯誤號: ' + CAST(ERROR_NUMBER() AS VARCHAR) + ')'
-        
-        PRINT @ErrorMessage
-        
-        -- 可選: 記錄錯誤到表中
-        -- INSERT INTO ErrorLog (ErrorTime, ErrorMessage, BatchNumber)
-        -- VALUES (GETDATE(), @ErrorMessage, @BatchNumber)
-        
-        -- 可選: 是否要繼續處理下一批？
-        -- 如果想在錯誤時中止，取消註釋下面行
-        -- BREAK
-    END CATCH
-END
+        Console.WriteLine("日誌已寫入: " + LogFilePath);
+        Console.ReadKey();
+    }
 
--- 記錄結束時間及總時間
-SET @EndTime = GETDATE()
-SET @TotalTime = DATEDIFF(SECOND, @StartTime, @EndTime)
+    // 基本日誌記錄方法
+    private static void LogToFile(string message, bool isError = false)
+    {
+        try
+        {
+            string prefix = isError ? "ERROR" : "INFO";
+            string logMessage = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{prefix}] - {message}";
+            
+            lock (LogLock)
+            {
+                File.AppendAllText(LogFilePath, logMessage + Environment.NewLine);
+            }
+            
+            // 可選：同時輸出到控制台
+            Console.WriteLine(logMessage);
+        }
+        catch
+        {
+            // 發生錯誤時的最小處理 - 只輸出到控制台
+            Console.WriteLine($"無法寫入日誌: {message}");
+        }
+    }
 
-PRINT '批量插入作業完成: ' + CONVERT(VARCHAR, @EndTime, 120)
-PRINT '總處理時間: ' + 
-      CAST(@TotalTime / 3600 AS VARCHAR) + ' 小時 ' + 
-      CAST((@TotalTime % 3600) / 60 AS VARCHAR) + ' 分鐘 ' + 
-      CAST((@TotalTime % 60) AS VARCHAR) + ' 秒'
-PRINT '總處理記錄數: ' + CAST(@ProcessedRecords AS VARCHAR) + ' / ' + CAST(@TotalRecords AS VARCHAR)
+    // 十六進制數據日誌記錄方法
+    private static void LogHexToFile(byte[] data, string prefix)
+    {
+        if (data == null || data.Length == 0)
+            return;
 
--- 清理臨時表
-DROP TABLE #BatchRanges
+        StringBuilder sb = new StringBuilder();
+        sb.Append(prefix).Append(": ");
+        
+        foreach (byte b in data)
+        {
+            sb.Append(b.ToString("X2")).Append(' ');
+        }
+
+        LogToFile(sb.ToString());
+    }
+}
+```
+
+## 方案二：使用本地函數（更現代的 C# 風格）
+
+```csharp
+using System;
+using System.IO;
+using System.Text;
+
+class Program
+{
+    static void Main(string[] args)
+    {
+        // 設置日誌文件路徑
+        string logFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SerialLog.txt");
+        object logLock = new object();
+
+        // 本地日誌函數
+        void LogToFile(string message, bool isError = false)
+        {
+            try
+            {
+                string prefix = isError ? "ERROR" : "INFO";
+                string logMessage = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{prefix}] - {message}";
+                
+                lock (logLock)
+                {
+                    File.AppendAllText(logFilePath, logMessage + Environment.NewLine);
+                }
+                
+                // 可選：同時輸出到控制台
+                Console.WriteLine(logMessage);
+            }
+            catch
+            {
+                Console.WriteLine($"無法寫入日誌: {message}");
+            }
+        }
+
+        // 本地十六進制日誌函數
+        void LogHexToFile(byte[] data, string prefix)
+        {
+            if (data == null || data.Length == 0)
+                return;
+
+            StringBuilder sb = new StringBuilder();
+            sb.Append(prefix).Append(": ");
+            
+            foreach (byte b in data)
+            {
+                sb.Append(b.ToString("X2")).Append(' ');
+            }
+            
+            // 添加ASCII表示
+            sb.Append(" | ");
+            foreach (byte b in data)
+            {
+                sb.Append(b >= 32 && b <= 126 ? (char)b : '.');
+            }
+
+            LogToFile(sb.ToString());
+        }
+
+        // 應用程序啟動
+        LogToFile("應用程序已啟動");
+
+        try
+        {
+            // TODO: 添加您的串口代碼
+            LogToFile("嘗試打開串口 COM3");
+            
+            // 模擬串口操作
+            System.Threading.Thread.Sleep(500); // 模擬操作延遲
+            
+            // 模擬收到數據
+            byte[] receivedData = new byte[] { 0x01, 0x02, 0x03, 0x04, 0xFF };
+            LogHexToFile(receivedData, "收到數據");
+            
+            // 模擬發送數據
+            byte[] sentData = new byte[] { 0xAA, 0xBB, 0xCC };
+            LogHexToFile(sentData, "發送數據");
+            
+            // 模擬錯誤情況
+            LogToFile("串口通信超時", isError: true);
+        }
+        catch (Exception ex)
+        {
+            LogToFile($"發生錯誤: {ex.Message}", isError: true);
+        }
+        
+        LogToFile("應用程序已關閉");
+        
+        Console.WriteLine("日誌已寫入: " + logFilePath);
+        Console.ReadKey();
+    }
+}
+```
+
+## 方案三：使用 Minimal API 風格的輕量日誌
+
+如果您使用的是 ASP.NET Core 或想要 Minimal API 風格的實現：
+
+```csharp
+using System;
+using System.IO;
+using System.Text;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Hosting;
+
+var builder = WebApplication.CreateBuilder(args);
+var app = builder.Build();
+
+// 設置日誌文件路徑
+string logFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SerialLog.txt");
+object logLock = new object();
+
+// 簡單日誌記錄功能
+Action<string, bool> LogToFile = (message, isError) =>
+{
+    try
+    {
+        string prefix = isError ? "ERROR" : "INFO";
+        string logMessage = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{prefix}] - {message}";
+        
+        lock (logLock)
+        {
+            File.AppendAllText(logFilePath, logMessage + Environment.NewLine);
+        }
+        
+        // 使用內建日誌系統同時記錄
+        if (isError)
+            app.Logger.LogError(message);
+        else
+            app.Logger.LogInformation(message);
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogError(ex, $"無法寫入日誌: {message}");
+    }
+};
+
+// 十六進制日誌記錄功能
+Action<byte[], string> LogHexToFile = (data, prefix) =>
+{
+    if (data == null || data.Length == 0)
+        return;
+
+    StringBuilder sb = new StringBuilder();
+    sb.Append(prefix).Append(": ");
+    
+    foreach (byte b in data)
+    {
+        sb.Append(b.ToString("X2")).Append(' ');
+    }
+
+    LogToFile(sb.ToString(), false);
+};
+
+// 記錄應用程序啟動
+LogToFile("應用程序已啟動", false);
+
+// 定義一個測試端點
+app.MapGet("/", () => "Hello World!");
+
+// 定義一個可觸發日誌記錄的端點
+app.MapGet("/log-test", () => {
+    LogToFile("收到日誌測試請求", false);
+    
+    byte[] testData = new byte[] { 0x01, 0x02, 0x03, 0x04, 0xFF };
+    LogHexToFile(testData, "測試數據");
+    
+    return "日誌已記錄";
+});
+
+// 應用關閉時記錄
+app.Lifetime.ApplicationStopping.Register(() => {
+    LogToFile("應用程序正在關閉", false);
+});
+
+app.Run();
+```
+
+## 方案四：只使用一個文件的最小實現
+
+如果您真的想要最小化，只在一個文件中實現所有功能，不引入任何額外服務或類：
+
+```csharp
+using System;
+using System.IO;
+using System.IO.Ports;
+using System.Text;
+using System.Threading;
+
+class Program
+{
+    static void Main(string[] args)
+    {
+        // 日誌配置
+        string logFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SerialLog.txt");
+        object logLock = new object();
+        
+        // 串口配置
+        string portName = "COM3";
+        int baudRate = 9600;
+        SerialPort serialPort = null;
+        
+        // 日誌函數
+        void Log(string message, bool isError = false)
+        {
+            string prefix = isError ? "ERROR" : "INFO";
+            string logMessage = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{prefix}] - {message}";
+            
+            try
+            {
+                lock (logLock)
+                {
+                    File.AppendAllText(logFilePath, logMessage + Environment.NewLine);
+                }
+                Console.WriteLine(logMessage);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"無法寫入日誌: {ex.Message}");
+            }
+        }
+        
+        // 十六進制日誌函數
+        void LogHex(byte[] data, string prefix)
+        {
+            if (data == null || data.Length == 0) return;
+            
+            StringBuilder sb = new StringBuilder();
+            sb.Append(prefix).Append(": ");
+            
+            foreach (byte b in data)
+            {
+                sb.Append(b.ToString("X2")).Append(' ');
+            }
+            
+            Log(sb.ToString());
+        }
+        
+        // 處理串口接收
+        void DataReceivedHandler(object sender, SerialDataReceivedEventArgs e)
+        {
+            if (serialPort == null) return;
+            
+            try
+            {
+                // 給接收緩衝區一些時間來接收完整數據
+                Thread.Sleep(50);
+                
+                int bytesToRead = serialPort.BytesToRead;
+                if (bytesToRead > 0)
+                {
+                    byte[] buffer = new byte[bytesToRead];
+                    serialPort.Read(buffer, 0, bytesToRead);
+                    
+                    // 記錄接收到的數據
+                    LogHex(buffer, "RX");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"讀取串口數據時發生錯誤: {ex.Message}", true);
+            }
+        }
+        
+        // 打開串口
+        bool OpenSerialPort()
+        {
+            try
+            {
+                Log($"嘗試打開串口 {portName}, 波特率: {baudRate}");
+                
+                serialPort = new SerialPort
+                {
+                    PortName = portName,
+                    BaudRate = baudRate,
+                    DataBits = 8,
+                    Parity = Parity.None,
+                    StopBits = StopBits.One,
+                    ReadTimeout = 1000,
+                    WriteTimeout = 1000
+                };
+                
+                serialPort.DataReceived += DataReceivedHandler;
+                serialPort.Open();
+                
+                Log($"串口 {portName} 已成功打開");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log($"打開串口時發生錯誤: {ex.Message}", true);
+                return false;
+            }
+        }
+        
+        // 發送數據
+        void SendData(byte[] data)
+        {
+            if (serialPort == null || !serialPort.IsOpen || data == null || data.Length == 0)
+                return;
+                
+            try
+            {
+                serialPort.Write(data, 0, data.Length);
+                LogHex(data, "TX");
+            }
+            catch (Exception ex)
+            {
+                Log($"發送數據時發生錯誤: {ex.Message}", true);
+            }
+        }
+        
+        // 關閉串口
+        void CloseSerialPort()
+        {
+            if (serialPort != null && serialPort.IsOpen)
+            {
+                try
+                {
+                    serialPort.DataReceived -= DataReceivedHandler;
+                    serialPort.Close();
+                    serialPort.Dispose();
+                    Log($"串口 {portName} 已關閉");
+                }
+                catch (Exception ex)
+                {
+                    Log($"關閉串口時發生錯誤: {ex.Message}", true);
+                }
+                finally
+                {
+                    serialPort = null;
+                }
+            }
+        }
+        
+        // 主程序
+        Log("應用程序已啟動");
+        
+        try
+        {
+            if (OpenSerialPort())
+            {
+                // 發送一些測試數據
+                byte[] testData = new byte[] { 0xAA, 0xBB, 0xCC, 0xDD };
+                SendData(testData);
+                
+                // 等待一段時間接收回應
+                Console.WriteLine("按任意鍵關閉應用程序...");
+                Console.ReadKey();
+                
+                // 關閉串口
+                CloseSerialPort();
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"應用程序運行時發生錯誤: {ex.Message}", true);
+        }
+        finally
+        {
+            CloseSerialPort();
+            Log("應用程序已關閉");
+        }
+    }
+}
+```
+
+選擇哪種方案取決於您的具體需求和使用場景。方案四是最完整的獨立實現，包含了串口通信和日誌記錄的完整功能。如果您只需要日誌記錄功能，方案一或方案二會更簡潔。如果您是在 ASP.NET Core 中工作，方案三可能更適合。
+
+這些方案都避免了創建額外的服務類，直接在 Program.cs 中實現所需功能。
