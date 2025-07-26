@@ -1,12 +1,49 @@
-# 修正版：基於類名的 DapperLogger 數據庫標識
+# Revised Version: DapperLogger with Database Identification Based on Class Names (with Configuration Options)
 
-以下是修改後的版本，允許在 DapperLogger 特性上添加一個字符串參數，用於標識數據庫。對於名為 "DbContext" 或以 "DbContext" 結尾的類，如果沒有明確標記 DapperLogger 特性，會自動使用類名作為數據庫標識：
+Below is a version with added configuration options that allow setting execution time thresholds and other options:
 
-## 1. 修改後的 DapperLogger 特性
+## 1. DapperLoggerOptions Configuration Class
+
+```csharp
+using System;
+
+public class DapperLoggerOptions
+{
+    /// <summary>
+    /// Execution time threshold (milliseconds), exceeding this value will log a warning
+    /// Default value: 2000 milliseconds (2 seconds)
+    /// </summary>
+    public int SlowExecutionThresholdMs { get; set; } = 2000;
+    
+    /// <summary>
+    /// Maximum length of SQL statements
+    /// Default value: 2048 characters
+    /// </summary>
+    public int MaxSqlLength { get; set; } = 2048;
+    
+    /// <summary>
+    /// Enable parameter sensitive information filtering
+    /// Default value: true
+    /// </summary>
+    public bool EnableParameterSanitization { get; set; } = true;
+    
+    /// <summary>
+    /// Keywords for parameter names that should be hidden
+    /// </summary>
+    public string[] SensitiveParameterKeywords { get; set; } = new string[] 
+    {
+        "password", "secret", "key", "token", "credential", "auth"
+    };
+}
+```
+
+## 2. Modified DapperLogger Attribute (With Configuration Support)
 
 ```csharp
 using AspectCore.DynamicProxy;
+using Microsoft.Extensions.Options;
 using Serilog;
+using Serilog.Events;
 using System;
 using System.Collections.Generic;
 using System.Data;
@@ -18,52 +55,58 @@ using System.Threading.Tasks;
 [AttributeUsage(AttributeTargets.Class | AttributeTargets.Interface)]
 public class DapperLoggerAttribute : AbstractInterceptorAttribute
 {
-    // 預定義所有 Dapper 方法名稱
+    // Predefined Dapper method names
     private static readonly HashSet<string> _dapperMethods = new(StringComparer.Ordinal)
     {
-        // 查詢方法
+        // Query methods
         "Query", "QueryFirst", "QueryFirstOrDefault", "QuerySingle", "QuerySingleOrDefault", "QueryMultiple",
         "QueryAsync", "QueryFirstAsync", "QueryFirstOrDefaultAsync", "QuerySingleAsync", "QuerySingleOrDefaultAsync", "QueryMultipleAsync",
         "Get", "GetAll", "GetAsync", "GetAllAsync", "Find", "FindAsync",
         
-        // 執行方法
+        // Execute methods
         "Execute", "ExecuteScalar", "ExecuteReader",
         "ExecuteAsync", "ExecuteScalarAsync", "ExecuteReaderAsync",
         "Insert", "Update", "Delete", "InsertAsync", "UpdateAsync", "DeleteAsync"
     };
 
-    // 使用 ThreadLocal 避免 Stopwatch 創建
+    // Use ThreadLocal to avoid Stopwatch creation
     private static readonly ThreadLocal<Stopwatch> _stopwatch = 
         new(() => new Stopwatch());
-        
-    // SQL 語句的最大長度
-    private const int MaxSqlLength = 2048;
     
-    // 數據庫標識
+    // Configuration options
+    private static DapperLoggerOptions _options = new DapperLoggerOptions();
+    
+    // Database identifier
     private readonly string _databaseIdentifier;
     
-    // 默認構造函數
+    // Default constructor
     public DapperLoggerAttribute() : this(null)
     {
     }
     
-    // 帶數據庫標識的構造函數
+    // Constructor with database identifier
     public DapperLoggerAttribute(string databaseIdentifier)
     {
         _databaseIdentifier = databaseIdentifier;
     }
+    
+    // Static method to set configuration options
+    internal static void SetOptions(DapperLoggerOptions options)
+    {
+        _options = options ?? new DapperLoggerOptions();
+    }
 
     public async override Task Invoke(AspectContext context, AspectDelegate next)
     {
-        // 獲取方法名稱和類型
+        // Get method name and type
         var methodName = context.ImplementationMethod.Name;
         var declaringType = context.ImplementationMethod.DeclaringType;
         var typeName = declaringType?.Name ?? "Unknown";
         
-        // 確定數據庫標識
+        // Determine database identifier
         string dbIdentifier = _databaseIdentifier;
         
-        // 如果沒有指定數據庫標識且類名是 DbContext 或以 DbContext 結尾，則使用類名作為標識
+        // If no database identifier is specified and class name is DbContext or ends with DbContext, use class name as identifier
         if (string.IsNullOrEmpty(dbIdentifier))
         {
             if (typeName.Equals("DbContext", StringComparison.OrdinalIgnoreCase) || 
@@ -73,7 +116,7 @@ public class DapperLoggerAttribute : AbstractInterceptorAttribute
             }
         }
         
-        // 檢查是否是 Dapper 方法
+        // Check if it's a Dapper method
         bool isDapperMethod = _dapperMethods.Contains(methodName) || 
             _dapperMethods.Any(prefix => methodName.StartsWith(prefix, StringComparison.Ordinal));
         
@@ -83,7 +126,7 @@ public class DapperLoggerAttribute : AbstractInterceptorAttribute
             return;
         }
 
-        // 獲取 Stopwatch
+        // Get Stopwatch
         var stopwatch = _stopwatch.Value;
         stopwatch.Reset();
         stopwatch.Start();
@@ -92,7 +135,7 @@ public class DapperLoggerAttribute : AbstractInterceptorAttribute
         
         try
         {
-            // 執行原始方法
+            // Execute original method
             await next(context);
         }
         catch (Exception ex)
@@ -107,16 +150,28 @@ public class DapperLoggerAttribute : AbstractInterceptorAttribute
             
             try
             {
-                // 提取 SQL 和參數
+                // Extract SQL and parameters
                 string sql = ExtractAndTruncateSql(context.Parameters);
                 object parameters = ExtractAndSanitizeParameters(context.Parameters);
                 
-                // 構建數據庫標識字符串
+                // Build database identifier string
                 string dbInfo = !string.IsNullOrEmpty(dbIdentifier) 
                     ? $"[{dbIdentifier}] " 
                     : string.Empty;
                 
-                // 根據是否有異常決定日誌級別和內容
+                // Determine log level based on execution time and exceptions
+                LogEventLevel logLevel = exception != null 
+                    ? LogEventLevel.Error 
+                    : (elapsedMs > _options.SlowExecutionThresholdMs 
+                        ? LogEventLevel.Warning 
+                        : LogEventLevel.Information);
+                
+                // Build log message
+                string logMessage = logLevel == LogEventLevel.Warning
+                    ? "Slow Dapper execution detected! Executed in {ElapsedMilliseconds}ms (threshold: {ThresholdMs}ms). {DbInfo}Method: {Method}, SQL: {Sql}, Parameters: {@Parameters}"
+                    : "Dapper executed in {ElapsedMilliseconds}ms. {DbInfo}Method: {Method}, SQL: {Sql}, Parameters: {@Parameters}";
+                
+                // Log based on log level
                 if (exception != null)
                 {
                     Log.Error(
@@ -128,12 +183,23 @@ public class DapperLoggerAttribute : AbstractInterceptorAttribute
                         sql,
                         parameters);
                 }
+                else if (logLevel == LogEventLevel.Warning)
+                {
+                    Log.Warning(
+                        logMessage,
+                        elapsedMs,
+                        _options.SlowExecutionThresholdMs,
+                        dbInfo,
+                        $"{typeName}.{methodName}",
+                        sql,
+                        parameters);
+                }
                 else
                 {
-                    // 統一使用 Info 級別
                     Log.Information(
-                        "Dapper executed in {ElapsedMilliseconds}ms. {DbInfo}Method: {Method}, SQL: {Sql}, Parameters: {@Parameters}",
+                        logMessage,
                         elapsedMs,
+                        _options.SlowExecutionThresholdMs,
                         dbInfo,
                         $"{typeName}.{methodName}",
                         sql,
@@ -142,23 +208,23 @@ public class DapperLoggerAttribute : AbstractInterceptorAttribute
             }
             catch (Exception ex)
             {
-                // 記錄日誌記錄本身的錯誤，避免影響主要業務邏輯
+                // Log errors in the logging process itself, avoid affecting the main business logic
                 Log.Error(ex, "Error while logging Dapper execution");
             }
         }
     }
 
-    // 提取並截斷 SQL 語句
+    // Extract and truncate SQL statement
     private string ExtractAndTruncateSql(object[] parameters)
     {
         for (int i = 0; i < parameters.Length; i++)
         {
             if (parameters[i] is string arg && !string.IsNullOrWhiteSpace(arg))
             {
-                // 檢查長度並截斷
-                if (arg.Length > MaxSqlLength)
+                // Check length and truncate
+                if (arg.Length > _options.MaxSqlLength)
                 {
-                    return arg.Substring(0, MaxSqlLength) + "... [TRUNCATED]";
+                    return arg.Substring(0, _options.MaxSqlLength) + "... [TRUNCATED]";
                 }
                 return arg;
             }
@@ -166,7 +232,7 @@ public class DapperLoggerAttribute : AbstractInterceptorAttribute
         return "Unknown SQL";
     }
 
-    // 提取並清理參數
+    // Extract and sanitize parameters
     private object ExtractAndSanitizeParameters(object[] parameters)
     {
         for (int i = 0; i < parameters.Length; i++)
@@ -179,13 +245,15 @@ public class DapperLoggerAttribute : AbstractInterceptorAttribute
                 !(parameters[i] is CommandType?) &&
                 !(parameters[i] is bool))
             {
-                return SanitizeObject(parameters[i]);
+                return _options.EnableParameterSanitization 
+                    ? SanitizeObject(parameters[i]) 
+                    : parameters[i];
             }
         }
         return null;
     }
     
-    // 清理對象，隱藏敏感信息
+    // Sanitize object, hide sensitive information
     private object SanitizeObject(object obj)
     {
         if (obj == null || obj.GetType().IsPrimitive || obj is string || obj is DateTime || obj is decimal)
@@ -201,8 +269,10 @@ public class DapperLoggerAttribute : AbstractInterceptorAttribute
             var propName = prop.Name.ToLowerInvariant();
             var value = prop.GetValue(obj);
             
-            if (propName.Contains("password") || propName.Contains("secret") || 
-                propName.Contains("key") || propName.Contains("token"))
+            bool isSensitive = _options.SensitiveParameterKeywords.Any(keyword => 
+                propName.Contains(keyword, StringComparison.OrdinalIgnoreCase));
+                
+            if (isSensitive)
             {
                 sanitizedObject[prop.Name] = "***REDACTED***";
             }
@@ -217,7 +287,7 @@ public class DapperLoggerAttribute : AbstractInterceptorAttribute
 }
 ```
 
-## 2. 更新 AspectCore 擴展方法以處理 DbContext 特例
+## 3. Updated AspectCore Extension Methods to Handle Configuration
 
 ```csharp
 using AspectCore.Configuration;
@@ -225,6 +295,7 @@ using AspectCore.DynamicProxy;
 using AspectCore.Extensions.DependencyInjection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using System;
 using System.Linq;
 using System.Reflection;
@@ -233,14 +304,26 @@ public static class AspectCoreExtensions
 {
     public static IServiceCollection AddDapperWithLogging(this IServiceCollection services)
     {
-        // 配置 AspectCore
+        return AddDapperWithLogging(services, options => {});
+    }
+    
+    public static IServiceCollection AddDapperWithLogging(this IServiceCollection services, 
+        Action<DapperLoggerOptions> configureOptions)
+    {
+        // Add configuration options
+        services.Configure<DapperLoggerOptions>(configureOptions);
+        
+        // Register configuration options setup
+        services.AddSingleton<IStartupFilter, DapperLoggerStartupFilter>();
+        
+        // Configure AspectCore
         services.ConfigureDynamicProxy(config =>
         {
-            // 攔截 DbContext、帶有 DapperLogger 特性的類，以及名為 DbContext 的類
+            // Intercept DbContext, classes with DapperLogger attribute, and classes named DbContext
             config.Interceptors.AddTyped<DapperLoggerAttribute>(method => 
                 ShouldInterceptMethod(method));
             
-            // 配置非代理方法
+            // Configure non-proxy methods
             config.NonAspectPredicates.AddNamespace("System.*");
             config.NonAspectPredicates.AddNamespace("Microsoft.*");
             config.NonAspectPredicates.AddNamespace("AspectCore.*");
@@ -249,7 +332,7 @@ public static class AspectCoreExtensions
         return services;
     }
     
-    // 檢查是否應該攔截方法
+    // Check if method should be intercepted
     private static bool ShouldInterceptMethod(MethodInfo method)
     {
         if (method?.DeclaringType == null)
@@ -258,65 +341,183 @@ public static class AspectCoreExtensions
         var declaringType = method.DeclaringType;
         var typeName = declaringType.Name;
         
-        // 檢查是否存在 DapperLogger 特性
+        // Check if DapperLogger attribute exists
         var hasAttribute = declaringType.GetCustomAttributes(typeof(DapperLoggerAttribute), true).Any() ||
                           declaringType.GetInterfaces()
                               .Any(i => i.GetCustomAttributes(typeof(DapperLoggerAttribute), true).Any());
         
-        // 檢查是否是 DbContext 子類
+        // Check if it's a DbContext subclass
         var isDbContext = declaringType.IsSubclassOf(typeof(DbContext));
         
-        // 檢查類名是否是 DbContext 或以 DbContext 結尾
+        // Check if class name is DbContext or ends with DbContext
         var isDbContextName = typeName.Equals("DbContext", StringComparison.OrdinalIgnoreCase) || 
                              typeName.EndsWith("DbContext", StringComparison.OrdinalIgnoreCase);
         
         return hasAttribute || isDbContext || isDbContextName;
     }
+    
+    // StartupFilter to configure DapperLogger options at startup
+    private class DapperLoggerStartupFilter : IStartupFilter
+    {
+        private readonly IOptions<DapperLoggerOptions> _options;
+        
+        public DapperLoggerStartupFilter(IOptions<DapperLoggerOptions> options)
+        {
+            _options = options;
+        }
+        
+        public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next)
+        {
+            // Set static configuration for DapperLogger
+            DapperLoggerAttribute.SetOptions(_options.Value);
+            
+            return next;
+        }
+    }
+}
+
+// Add IStartupFilter interface
+public interface IStartupFilter
+{
+    Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next);
+}
+
+public interface IApplicationBuilder
+{
+    IServiceProvider ApplicationServices { get; }
 }
 ```
 
-## 3. 使用範例
+## 4. Configuration Example (appsettings.json)
 
-### 3.1 具有明確數據庫標識的儲存庫
+```json
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft": "Warning",
+      "Microsoft.Hosting.Lifetime": "Information"
+    }
+  },
+  "Serilog": {
+    "MinimumLevel": {
+      "Default": "Information",
+      "Override": {
+        "Microsoft": "Warning",
+        "System": "Warning"
+      }
+    },
+    "WriteTo": [
+      {
+        "Name": "Console",
+        "Args": {
+          "outputTemplate": "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}"
+        }
+      },
+      {
+        "Name": "File",
+        "Args": {
+          "path": "logs/log-.txt",
+          "rollingInterval": "Day",
+          "outputTemplate": "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj}{NewLine}{Exception}"
+        }
+      }
+    ],
+    "Enrich": [ "FromLogContext", "WithMachineName", "WithThreadId" ]
+  },
+  "DapperLogger": {
+    "SlowExecutionThresholdMs": 2000,
+    "MaxSqlLength": 4096,
+    "EnableParameterSanitization": true,
+    "SensitiveParameterKeywords": [
+      "password",
+      "secret",
+      "key",
+      "token",
+      "credential",
+      "auth"
+    ]
+  }
+}
+```
+
+## 5. Configure DapperLogger in Startup and Read Settings from Configuration File
 
 ```csharp
-// 使用 DapperLogger 特性並指定數據庫標識
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+
+public class Startup
+{
+    private readonly IConfiguration _configuration;
+    
+    public Startup(IConfiguration configuration)
+    {
+        _configuration = configuration;
+    }
+    
+    public void ConfigureServices(IServiceCollection services)
+    {
+        // Add DapperLogger and configure options
+        services.AddDapperWithLogging(options => 
+        {
+            // Load settings from configuration file
+            _configuration.GetSection("DapperLogger").Bind(options);
+        });
+        
+        // Configure Serilog
+        Log.Logger = new LoggerConfiguration()
+            .ReadFrom.Configuration(_configuration)
+            .CreateLogger();
+        
+        // Other service configurations...
+    }
+    
+    public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
+    {
+        // Application configurations...
+    }
+}
+```
+
+## 6. Usage Examples
+
+### 6.1 Using in Repositories
+
+```csharp
+// Explicitly specify database identifier
 [DapperLogger("OracleDB")]
 public class ProductRepository : IProductRepository
 {
-    private readonly AppDbContext _dbContext;
+    private readonly IDbConnection _connection;
     
-    public ProductRepository(AppDbContext dbContext)
+    public ProductRepository(IDbConnection connection)
     {
-        _dbContext = dbContext;
+        _connection = connection;
     }
     
-    // 實現方法...
+    public async Task<IEnumerable<Product>> GetAllProductsAsync()
+    {
+        // This operation will be logged as a warning if execution time exceeds 2 seconds
+        return await _connection.QueryAsync<Product>("SELECT * FROM Products");
+    }
+    
+    public async Task<Product> GetProductByIdAsync(int id)
+    {
+        return await _connection.QueryFirstOrDefaultAsync<Product>(
+            "SELECT * FROM Products WHERE Id = @Id", 
+            new { Id = id });
+    }
 }
 ```
 
-### 3.2 使用默認數據庫標識的儲存庫
+### 6.2 Using in DbContext
 
 ```csharp
-// 使用 DapperLogger 特性但不指定數據庫標識
-[DapperLogger]
-public class CustomerRepository : ICustomerRepository
-{
-    private readonly AppDbContext _dbContext;
-    
-    public CustomerRepository(AppDbContext dbContext)
-    {
-        _dbContext = dbContext;
-    }
-    
-    // 實現方法...
-}
-```
-
-### 3.3 自動使用類名作為標識的 DbContext 類
-
-```csharp
-// 不需要顯式添加 DapperLogger 特性，將自動使用類名作為數據庫標識
+// No need to explicitly add DapperLogger attribute, will automatically use class name as identifier
 public class SalesDbContext : DbContext
 {
     private readonly IDbConnection _connection;
@@ -327,54 +528,43 @@ public class SalesDbContext : DbContext
         _connection = connection;
     }
     
-    // 實現方法...
-}
-```
-
-### 3.4 帶有明確數據庫標識的 DbContext 類
-
-```csharp
-// 明確指定數據庫標識
-[DapperLogger("MainDatabase")]
-public class AppDbContext : DbContext
-{
-    private readonly IDbConnection _connection;
-    
-    public AppDbContext(DbContextOptions<AppDbContext> options, IDbConnection connection) 
-        : base(options)
+    public async Task<IEnumerable<Sale>> GetSalesAsync(DateTime startDate)
     {
-        _connection = connection;
+        // This operation will be logged as a warning if execution time exceeds 2 seconds
+        return await _connection.QueryAsync<Sale>(
+            "SELECT * FROM Sales WHERE Date >= @StartDate", 
+            new { StartDate = startDate });
     }
-    
-    // 實現方法...
 }
 ```
 
-## 4. 日誌輸出示例
+## 7. Log Output Examples
 
-1. **帶有指定數據庫標識的日誌**：
+1. **Normal execution log**:
    ```
-   [10:15:30 INF] Dapper executed in 45ms. [OracleDB] Method: ProductRepository.GetAllAsync, SQL: SELECT * FROM Products, Parameters: {}
-   ```
-
-2. **使用類名作為數據庫標識的日誌**：
-   ```
-   [10:16:05 INF] Dapper executed in 32ms. [SalesDbContext] Method: SalesDbContext.QueryAsync, SQL: SELECT * FROM Sales WHERE Date > @StartDate, Parameters: { "StartDate": "2023-01-01" }
+   [10:15:30 INF] Dapper executed in 45ms. [OracleDB] Method: ProductRepository.GetAllProductsAsync, SQL: SELECT * FROM Products, Parameters: {}
    ```
 
-3. **帶有明確數據庫標識的 DbContext 日誌**：
+2. **Slow execution warning log**:
    ```
-   [10:17:12 INF] Dapper executed in 28ms. [MainDatabase] Method: AppDbContext.QueryAsync, SQL: SELECT * FROM Customers WHERE Id = @Id, Parameters: { "Id": 123 }
+   [10:16:05 WRN] Slow Dapper execution detected! Executed in 3542ms (threshold: 2000ms). [SalesDbContext] Method: SalesDbContext.GetSalesAsync, SQL: SELECT * FROM Sales WHERE Date >= @StartDate, Parameters: { "StartDate": "2023-01-01" }
    ```
 
-## 5. 總結
+3. **Execution error log**:
+   ```
+   [10:17:12 ERR] Error executing Dapper in 123ms. [MainDatabase] Method: CustomerRepository.GetCustomerByIdAsync, SQL: SELECT * FROM Customers WHERE Id = @Id, Parameters: { "Id": 123 }
+   System.Data.SqlClient.SqlException (0x80131904): Invalid column name 'InvalidColumn'.
+   ```
 
-這個實現提供了靈活的數據庫標識機制：
+## 8. Summary
 
-1. **明確標識**：可以通過 `[DapperLogger("DatabaseName")]` 明確指定數據庫標識
-2. **自動標識**：對於名為 "DbContext" 或以 "DbContext" 結尾的類，自動使用類名作為標識
-3. **標準輸出格式**：在日誌中顯示為 `[DatabaseName]`，使日誌更清晰易讀
-4. **敏感數據保護**：自動隱藏參數中的敏感信息（密碼、密鑰等）
-5. **SQL 長度限制**：確保 SQL 語句不會超過 2048 個字符，避免日誌過大
+This implementation provides the following features:
 
-這個設計既簡單又靈活，適用於多數據庫環境，特別是在微服務架構或需要連接多個數據源的應用程序中。
+1. **Explicit database identification**: Specify database identifier through `[DapperLogger("DatabaseName")]`
+2. **Automatic identification**: Automatically use class name as identifier for DbContext classes
+3. **Configurable execution time threshold**: Operations exceeding specified threshold (default 2 seconds) will be logged as warnings
+4. **Configurable SQL length limit**: Ensures SQL statements don't exceed specified length
+5. **Configurable sensitive data protection**: Customize keywords for sensitive parameters to be hidden
+6. **Load settings from configuration file**: Support loading configurations from appsettings.json
+
+This design is both flexible and practical, suitable for multi-database environments, and can help developers identify and resolve database performance issues.
