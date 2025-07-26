@@ -1,6 +1,6 @@
-# Revised Version: DapperLogger with Database Identification Based on Class Names (with Configuration Options)
+# Complete Implementation: DapperLogger with Database Identification and Configurable Thresholds
 
-Below is a version with added configuration options that allow setting execution time thresholds and other options:
+Below is the complete implementation of the DapperLogger with all features, including the minimum execution time threshold to avoid logging fast queries:
 
 ## 1. DapperLoggerOptions Configuration Class
 
@@ -9,6 +9,12 @@ using System;
 
 public class DapperLoggerOptions
 {
+    /// <summary>
+    /// Minimum execution time (milliseconds) to log. Queries faster than this will not be logged.
+    /// Default value: 200 milliseconds
+    /// </summary>
+    public int MinimumLoggingThresholdMs { get; set; } = 200;
+    
     /// <summary>
     /// Execution time threshold (milliseconds), exceeding this value will log a warning
     /// Default value: 2000 milliseconds (2 seconds)
@@ -37,7 +43,7 @@ public class DapperLoggerOptions
 }
 ```
 
-## 2. Modified DapperLogger Attribute (With Configuration Support)
+## 2. DapperLogger Attribute Implementation
 
 ```csharp
 using AspectCore.DynamicProxy;
@@ -58,15 +64,63 @@ public class DapperLoggerAttribute : AbstractInterceptorAttribute
     // Predefined Dapper method names
     private static readonly HashSet<string> _dapperMethods = new(StringComparer.Ordinal)
     {
-        // Query methods
+        // Comprehensive list of Dapper method names
+    private static readonly HashSet<string> _dapperMethods = new(StringComparer.Ordinal)
+    {
+        // Core Query Methods - Standard Dapper
         "Query", "QueryFirst", "QueryFirstOrDefault", "QuerySingle", "QuerySingleOrDefault", "QueryMultiple",
         "QueryAsync", "QueryFirstAsync", "QueryFirstOrDefaultAsync", "QuerySingleAsync", "QuerySingleOrDefaultAsync", "QueryMultipleAsync",
-        "Get", "GetAll", "GetAsync", "GetAllAsync", "Find", "FindAsync",
         
-        // Execute methods
+        // Query Methods with Type Parameters
+        "Query<T>", "QueryFirst<T>", "QueryFirstOrDefault<T>", "QuerySingle<T>", "QuerySingleOrDefault<T>",
+        "QueryAsync<T>", "QueryFirstAsync<T>", "QueryFirstOrDefaultAsync<T>", "QuerySingleAsync<T>", "QuerySingleOrDefaultAsync<T>",
+        
+        // Execute Methods - Standard Dapper
         "Execute", "ExecuteScalar", "ExecuteReader",
         "ExecuteAsync", "ExecuteScalarAsync", "ExecuteReaderAsync",
-        "Insert", "Update", "Delete", "InsertAsync", "UpdateAsync", "DeleteAsync"
+        
+        // Execute Methods with Type Parameters
+        "ExecuteScalar<T>", "ExecuteScalarAsync<T>",
+        
+        // Dapper.Contrib Methods
+        "Get", "GetAll", "GetAsync", "GetAllAsync",
+        "Insert", "Update", "Delete", "DeleteAll",
+        "InsertAsync", "UpdateAsync", "DeleteAsync", "DeleteAllAsync",
+        
+        // Dapper.SimpleCRUD Methods
+        "Get<T>", "GetList<T>", "GetListPaged<T>", "GetListFiltered<T>",
+        "GetAsync<T>", "GetListAsync<T>", "GetListPagedAsync<T>", "GetListFilteredAsync<T>",
+        "Insert<T>", "Update<T>", "Delete<T>", "DeleteList<T>", "RecordCount<T>",
+        "InsertAsync<T>", "UpdateAsync<T>", "DeleteAsync<T>", "DeleteListAsync<T>", "RecordCountAsync<T>",
+        
+        // Common Repository Pattern Method Names
+        "Find", "FindAll", "FindById", "FindByIds", "FindByName", "FindByQuery",
+        "FindAsync", "FindAllAsync", "FindByIdAsync", "FindByIdsAsync", "FindByNameAsync", "FindByQueryAsync",
+        
+        // Common CRUD Operations in Repositories
+        "Add", "AddRange", "Create", "CreateBulk", "Save", "SaveAll", "SaveChanges",
+        "AddAsync", "AddRangeAsync", "CreateAsync", "CreateBulkAsync", "SaveAsync", "SaveAllAsync", "SaveChangesAsync",
+        "Modify", "ModifyAsync", "UpdateById", "UpdateByIdAsync", "UpdateRange", "UpdateRangeAsync",
+        "Remove", "RemoveAll", "RemoveById", "RemoveByIds", "RemoveRange",
+        "RemoveAsync", "RemoveAllAsync", "RemoveByIdAsync", "RemoveByIdsAsync", "RemoveRangeAsync",
+        
+        // Bulk Operations
+        "BulkInsert", "BulkUpdate", "BulkDelete", "BulkMerge",
+        "BulkInsertAsync", "BulkUpdateAsync", "BulkDeleteAsync", "BulkMergeAsync",
+        
+        // Stored Procedure Related
+        "ExecuteProcedure", "ExecuteProcedureAsync", "ExecuteStoredProcedure", "ExecuteStoredProcedureAsync",
+        "ExecuteProc", "ExecuteProcAsync", "ExecProc", "ExecProcAsync",
+        
+        // Transaction Related
+        "ExecuteInTransaction", "ExecuteInTransactionAsync",
+        
+        // Count Operations
+        "Count", "CountAsync", "CountAll", "CountAllAsync", "GetCount", "GetCountAsync",
+        
+        // Exists Operations
+        "Exists", "ExistsAsync", "Any", "AnyAsync"
+    };
     };
 
     // Use ThreadLocal to avoid Stopwatch creation
@@ -147,6 +201,12 @@ public class DapperLoggerAttribute : AbstractInterceptorAttribute
         {
             stopwatch.Stop();
             var elapsedMs = stopwatch.ElapsedMilliseconds;
+            
+            // Skip logging if execution time is below the minimum threshold and there's no exception
+            if (elapsedMs < _options.MinimumLoggingThresholdMs && exception == null)
+            {
+                return;
+            }
             
             try
             {
@@ -287,7 +347,7 @@ public class DapperLoggerAttribute : AbstractInterceptorAttribute
 }
 ```
 
-## 3. Updated AspectCore Extension Methods to Handle Configuration
+## 3. AspectCore Extensions for DapperLogger
 
 ```csharp
 using AspectCore.Configuration;
@@ -388,7 +448,50 @@ public interface IApplicationBuilder
 }
 ```
 
-## 4. Configuration Example (appsettings.json)
+## 4. Startup Class Configuration
+
+```csharp
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Serilog;
+
+public class Startup
+{
+    private readonly IConfiguration _configuration;
+    
+    public Startup(IConfiguration configuration)
+    {
+        _configuration = configuration;
+    }
+    
+    public void ConfigureServices(IServiceCollection services)
+    {
+        // Add DapperLogger and configure options
+        services.AddDapperWithLogging(options => 
+        {
+            // Load settings from configuration file
+            _configuration.GetSection("DapperLogger").Bind(options);
+        });
+        
+        // Configure Serilog
+        Log.Logger = new LoggerConfiguration()
+            .ReadFrom.Configuration(_configuration)
+            .CreateLogger();
+        
+        // Other service configurations...
+    }
+    
+    public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
+    {
+        // Application configurations...
+    }
+}
+```
+
+## 5. Configuration File (appsettings.json)
 
 ```json
 {
@@ -426,6 +529,7 @@ public interface IApplicationBuilder
     "Enrich": [ "FromLogContext", "WithMachineName", "WithThreadId" ]
   },
   "DapperLogger": {
+    "MinimumLoggingThresholdMs": 200,
     "SlowExecutionThresholdMs": 2000,
     "MaxSqlLength": 4096,
     "EnableParameterSanitization": true,
@@ -441,53 +545,16 @@ public interface IApplicationBuilder
 }
 ```
 
-## 5. Configure DapperLogger in Startup and Read Settings from Configuration File
-
-```csharp
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-
-public class Startup
-{
-    private readonly IConfiguration _configuration;
-    
-    public Startup(IConfiguration configuration)
-    {
-        _configuration = configuration;
-    }
-    
-    public void ConfigureServices(IServiceCollection services)
-    {
-        // Add DapperLogger and configure options
-        services.AddDapperWithLogging(options => 
-        {
-            // Load settings from configuration file
-            _configuration.GetSection("DapperLogger").Bind(options);
-        });
-        
-        // Configure Serilog
-        Log.Logger = new LoggerConfiguration()
-            .ReadFrom.Configuration(_configuration)
-            .CreateLogger();
-        
-        // Other service configurations...
-    }
-    
-    public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
-    {
-        // Application configurations...
-    }
-}
-```
-
 ## 6. Usage Examples
 
-### 6.1 Using in Repositories
+### 6.1 Repository with Explicit Database Identifier
 
 ```csharp
+using Dapper;
+using System.Collections.Generic;
+using System.Data;
+using System.Threading.Tasks;
+
 // Explicitly specify database identifier
 [DapperLogger("OracleDB")]
 public class ProductRepository : IProductRepository
@@ -501,7 +568,8 @@ public class ProductRepository : IProductRepository
     
     public async Task<IEnumerable<Product>> GetAllProductsAsync()
     {
-        // This operation will be logged as a warning if execution time exceeds 2 seconds
+        // Queries that take less than MinimumLoggingThresholdMs (200ms) will not be logged
+        // Queries that take more than SlowExecutionThresholdMs (2000ms) will be logged as warnings
         return await _connection.QueryAsync<Product>("SELECT * FROM Products");
     }
     
@@ -511,12 +579,26 @@ public class ProductRepository : IProductRepository
             "SELECT * FROM Products WHERE Id = @Id", 
             new { Id = id });
     }
+    
+    public async Task<int> CreateProductAsync(Product product)
+    {
+        return await _connection.ExecuteAsync(
+            "INSERT INTO Products (Name, Price, CategoryId) VALUES (@Name, @Price, @CategoryId)",
+            product);
+    }
 }
 ```
 
-### 6.2 Using in DbContext
+### 6.2 DbContext with Automatic Database Identification
 
 ```csharp
+using Dapper;
+using Microsoft.EntityFrameworkCore;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Threading.Tasks;
+
 // No need to explicitly add DapperLogger attribute, will automatically use class name as identifier
 public class SalesDbContext : DbContext
 {
@@ -530,41 +612,132 @@ public class SalesDbContext : DbContext
     
     public async Task<IEnumerable<Sale>> GetSalesAsync(DateTime startDate)
     {
-        // This operation will be logged as a warning if execution time exceeds 2 seconds
+        // Queries that take less than MinimumLoggingThresholdMs (200ms) will not be logged
+        // Queries that take more than SlowExecutionThresholdMs (2000ms) will be logged as warnings
         return await _connection.QueryAsync<Sale>(
             "SELECT * FROM Sales WHERE Date >= @StartDate", 
             new { StartDate = startDate });
+    }
+    
+    public async Task<int> CreateSaleAsync(Sale sale)
+    {
+        return await _connection.ExecuteAsync(
+            "INSERT INTO Sales (Date, Amount, CustomerId, ProductId) VALUES (@Date, @Amount, @CustomerId, @ProductId)",
+            sale);
+    }
+    
+    public async Task<IEnumerable<SalesSummary>> GetSalesSummaryAsync(DateTime startDate, DateTime endDate)
+    {
+        return await _connection.QueryAsync<SalesSummary>(
+            @"SELECT 
+                ProductId, 
+                SUM(Amount) AS TotalAmount, 
+                COUNT(*) AS Count 
+              FROM Sales 
+              WHERE Date BETWEEN @StartDate AND @EndDate 
+              GROUP BY ProductId",
+            new { StartDate = startDate, EndDate = endDate });
+    }
+}
+```
+
+### 6.3 Service with Database Interface Injection
+
+```csharp
+using Dapper;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Threading.Tasks;
+
+public interface ICustomerDatabaseService
+{
+    Task<Customer> GetCustomerByIdAsync(int id);
+    Task<IEnumerable<Customer>> FindCustomersByNameAsync(string namePattern);
+    Task<int> UpdateCustomerAsync(Customer customer);
+}
+
+[DapperLogger("CustomerDB")]
+public class CustomerDatabaseService : ICustomerDatabaseService
+{
+    private readonly IDbConnection _connection;
+    
+    public CustomerDatabaseService(IDbConnection connection)
+    {
+        _connection = connection;
+    }
+    
+    public async Task<Customer> GetCustomerByIdAsync(int id)
+    {
+        return await _connection.QueryFirstOrDefaultAsync<Customer>(
+            "SELECT * FROM Customers WHERE Id = @Id",
+            new { Id = id });
+    }
+    
+    public async Task<IEnumerable<Customer>> FindCustomersByNameAsync(string namePattern)
+    {
+        return await _connection.QueryAsync<Customer>(
+            "SELECT * FROM Customers WHERE Name LIKE @NamePattern",
+            new { NamePattern = $"%{namePattern}%" });
+    }
+    
+    public async Task<int> UpdateCustomerAsync(Customer customer)
+    {
+        return await _connection.ExecuteAsync(
+            @"UPDATE Customers 
+              SET Name = @Name, Email = @Email, Address = @Address, Phone = @Phone
+              WHERE Id = @Id",
+            customer);
     }
 }
 ```
 
 ## 7. Log Output Examples
 
-1. **Normal execution log**:
+With the minimum logging threshold set to 200ms, the logging behavior will be:
+
+1. **Fast Queries (< 200ms)**:
+   - Not logged at all (unless an exception occurs)
+
+2. **Normal Queries (200ms - 2000ms)**:
    ```
-   [10:15:30 INF] Dapper executed in 45ms. [OracleDB] Method: ProductRepository.GetAllProductsAsync, SQL: SELECT * FROM Products, Parameters: {}
+   [10:15:30 INF] Dapper executed in 450ms. [OracleDB] Method: ProductRepository.GetAllProductsAsync, SQL: SELECT * FROM Products, Parameters: {}
    ```
 
-2. **Slow execution warning log**:
+3. **Slow Queries (> 2000ms)**:
    ```
-   [10:16:05 WRN] Slow Dapper execution detected! Executed in 3542ms (threshold: 2000ms). [SalesDbContext] Method: SalesDbContext.GetSalesAsync, SQL: SELECT * FROM Sales WHERE Date >= @StartDate, Parameters: { "StartDate": "2023-01-01" }
+   [10:16:05 WRN] Slow Dapper execution detected! Executed in 3542ms (threshold: 2000ms). [SalesDbContext] Method: SalesDbContext.GetSalesSummaryAsync, SQL: SELECT ProductId, SUM(Amount) AS TotalAmount, COUNT(*) AS Count FROM Sales WHERE Date BETWEEN @StartDate AND @EndDate GROUP BY ProductId, Parameters: { "StartDate": "2023-01-01", "EndDate": "2023-12-31" }
    ```
 
-3. **Execution error log**:
+4. **Error Cases (any duration)**:
    ```
-   [10:17:12 ERR] Error executing Dapper in 123ms. [MainDatabase] Method: CustomerRepository.GetCustomerByIdAsync, SQL: SELECT * FROM Customers WHERE Id = @Id, Parameters: { "Id": 123 }
+   [10:17:12 ERR] Error executing Dapper in 123ms. [CustomerDB] Method: CustomerDatabaseService.GetCustomerByIdAsync, SQL: SELECT * FROM Customers WHERE Id = @Id, Parameters: { "Id": 123 }
    System.Data.SqlClient.SqlException (0x80131904): Invalid column name 'InvalidColumn'.
    ```
 
-## 8. Summary
+## 8. Summary and Key Features
 
-This implementation provides the following features:
+This implementation provides a comprehensive solution for logging Dapper database operations with the following key features:
 
-1. **Explicit database identification**: Specify database identifier through `[DapperLogger("DatabaseName")]`
-2. **Automatic identification**: Automatically use class name as identifier for DbContext classes
-3. **Configurable execution time threshold**: Operations exceeding specified threshold (default 2 seconds) will be logged as warnings
-4. **Configurable SQL length limit**: Ensures SQL statements don't exceed specified length
-5. **Configurable sensitive data protection**: Customize keywords for sensitive parameters to be hidden
-6. **Load settings from configuration file**: Support loading configurations from appsettings.json
+1. **Performance-Based Logging**:
+   - Queries faster than 200ms are not logged (configurable)
+   - Slow queries (> 2000ms) are logged as warnings
+   - All errors are logged regardless of execution time
 
-This design is both flexible and practical, suitable for multi-database environments, and can help developers identify and resolve database performance issues.
+2. **Database Identification**:
+   - Explicit identification via attribute parameter: `[DapperLogger("DatabaseName")]`
+   - Automatic identification for DbContext classes using class name
+
+3. **Privacy and Security**:
+   - Sensitive parameters are automatically redacted
+   - SQL statements are truncated to avoid excessive log size
+
+4. **Configurability**:
+   - All thresholds and settings are configurable via appsettings.json
+   - Customizable list of sensitive parameter keywords
+
+5. **Integration**:
+   - Seamlessly integrates with AspectCore for AOP
+   - Works with both EF Core DbContext and standard Dapper usage
+
+This implementation strikes a balance between providing enough information for monitoring and troubleshooting while avoiding excessive logging that could impact performance or storage.
