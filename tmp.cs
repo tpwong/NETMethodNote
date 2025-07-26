@@ -1,6 +1,6 @@
-# Complete Implementation: DapperLogger with Database Identification and Configurable Thresholds
+# Complete Implementation: DapperLogger with Enhanced Method Detection
 
-Below is the complete implementation of the DapperLogger with all features, including the minimum execution time threshold to avoid logging fast queries:
+Here's the complete implementation with a comprehensive list of Dapper-related method names for more accurate method detection:
 
 ## 1. DapperLoggerOptions Configuration Class
 
@@ -43,7 +43,7 @@ public class DapperLoggerOptions
 }
 ```
 
-## 2. DapperLogger Attribute Implementation
+## 2. DapperLogger Attribute Implementation with Comprehensive Method Detection
 
 ```csharp
 using AspectCore.DynamicProxy;
@@ -61,10 +61,7 @@ using System.Threading.Tasks;
 [AttributeUsage(AttributeTargets.Class | AttributeTargets.Interface)]
 public class DapperLoggerAttribute : AbstractInterceptorAttribute
 {
-    // Predefined Dapper method names
-    private static readonly HashSet<string> _dapperMethods = new(StringComparer.Ordinal)
-    {
-        // Comprehensive list of Dapper method names
+    // Comprehensive list of Dapper method names
     private static readonly HashSet<string> _dapperMethods = new(StringComparer.Ordinal)
     {
         // Core Query Methods - Standard Dapper
@@ -121,7 +118,6 @@ public class DapperLoggerAttribute : AbstractInterceptorAttribute
         // Exists Operations
         "Exists", "ExistsAsync", "Any", "AnyAsync"
     };
-    };
 
     // Use ThreadLocal to avoid Stopwatch creation
     private static readonly ThreadLocal<Stopwatch> _stopwatch = 
@@ -173,6 +169,35 @@ public class DapperLoggerAttribute : AbstractInterceptorAttribute
         // Check if it's a Dapper method
         bool isDapperMethod = _dapperMethods.Contains(methodName) || 
             _dapperMethods.Any(prefix => methodName.StartsWith(prefix, StringComparison.Ordinal));
+        
+        // Also check for methods in repositories or services that might use Dapper internally
+        if (!isDapperMethod && (
+            declaringType.Name.EndsWith("Repository", StringComparison.OrdinalIgnoreCase) ||
+            declaringType.Name.EndsWith("DataAccess", StringComparison.OrdinalIgnoreCase) ||
+            declaringType.Name.EndsWith("DataService", StringComparison.OrdinalIgnoreCase) ||
+            declaringType.Name.EndsWith("DbService", StringComparison.OrdinalIgnoreCase)))
+        {
+            // Look for method names that imply database operations
+            if (methodName.StartsWith("Get", StringComparison.OrdinalIgnoreCase) ||
+                methodName.StartsWith("Find", StringComparison.OrdinalIgnoreCase) ||
+                methodName.StartsWith("Load", StringComparison.OrdinalIgnoreCase) ||
+                methodName.StartsWith("Fetch", StringComparison.OrdinalIgnoreCase) ||
+                methodName.StartsWith("Select", StringComparison.OrdinalIgnoreCase) ||
+                methodName.StartsWith("Insert", StringComparison.OrdinalIgnoreCase) ||
+                methodName.StartsWith("Update", StringComparison.OrdinalIgnoreCase) ||
+                methodName.StartsWith("Delete", StringComparison.OrdinalIgnoreCase) ||
+                methodName.StartsWith("Save", StringComparison.OrdinalIgnoreCase) ||
+                methodName.StartsWith("Create", StringComparison.OrdinalIgnoreCase) ||
+                methodName.StartsWith("Modify", StringComparison.OrdinalIgnoreCase) ||
+                methodName.StartsWith("Remove", StringComparison.OrdinalIgnoreCase) ||
+                methodName.StartsWith("Execute", StringComparison.OrdinalIgnoreCase) ||
+                methodName.StartsWith("Count", StringComparison.OrdinalIgnoreCase) ||
+                methodName.StartsWith("Exists", StringComparison.OrdinalIgnoreCase) ||
+                methodName.StartsWith("Any", StringComparison.OrdinalIgnoreCase))
+            {
+                isDapperMethod = true;
+            }
+        }
         
         if (!isDapperMethod)
         {
@@ -281,15 +306,41 @@ public class DapperLoggerAttribute : AbstractInterceptorAttribute
         {
             if (parameters[i] is string arg && !string.IsNullOrWhiteSpace(arg))
             {
-                // Check length and truncate
-                if (arg.Length > _options.MaxSqlLength)
+                // Check if this parameter looks like SQL
+                if (IsSqlStatement(arg))
                 {
-                    return arg.Substring(0, _options.MaxSqlLength) + "... [TRUNCATED]";
+                    // Check length and truncate
+                    if (arg.Length > _options.MaxSqlLength)
+                    {
+                        return arg.Substring(0, _options.MaxSqlLength) + "... [TRUNCATED]";
+                    }
+                    return arg;
                 }
-                return arg;
             }
         }
         return "Unknown SQL";
+    }
+    
+    // Simple check to see if a string looks like SQL
+    private bool IsSqlStatement(string text)
+    {
+        string upperText = text.ToUpperInvariant().TrimStart();
+        
+        return upperText.StartsWith("SELECT ") ||
+               upperText.StartsWith("INSERT ") ||
+               upperText.StartsWith("UPDATE ") ||
+               upperText.StartsWith("DELETE ") ||
+               upperText.StartsWith("WITH ") ||
+               upperText.StartsWith("MERGE ") ||
+               upperText.StartsWith("CREATE ") ||
+               upperText.StartsWith("ALTER ") ||
+               upperText.StartsWith("DROP ") ||
+               upperText.StartsWith("EXEC ") ||
+               upperText.StartsWith("EXECUTE ") ||
+               upperText.StartsWith("CALL ") ||
+               upperText.StartsWith("DECLARE ") ||
+               upperText.StartsWith("BEGIN ") ||
+               upperText.StartsWith("SET ");
     }
 
     // Extract and sanitize parameters
@@ -316,17 +367,46 @@ public class DapperLoggerAttribute : AbstractInterceptorAttribute
     // Sanitize object, hide sensitive information
     private object SanitizeObject(object obj)
     {
-        if (obj == null || obj.GetType().IsPrimitive || obj is string || obj is DateTime || obj is decimal)
+        if (obj == null)
+        {
+            return null;
+        }
+        
+        // Handle simple types directly
+        if (obj.GetType().IsPrimitive || 
+            obj is string || 
+            obj is DateTime || 
+            obj is DateTimeOffset || 
+            obj is TimeSpan || 
+            obj is decimal || 
+            obj is Guid)
         {
             return obj;
         }
         
+        // Handle dictionaries
+        if (obj is IDictionary<string, object> dictionary)
+        {
+            var sanitizedDict = new Dictionary<string, object>();
+            
+            foreach (var pair in dictionary)
+            {
+                bool isSensitive = _options.SensitiveParameterKeywords.Any(keyword => 
+                    pair.Key.Contains(keyword, StringComparison.OrdinalIgnoreCase));
+                    
+                sanitizedDict[pair.Key] = isSensitive ? "***REDACTED***" : pair.Value;
+            }
+            
+            return sanitizedDict;
+        }
+        
+        // Handle anonymous types and other objects with properties
         var properties = obj.GetType().GetProperties();
         var sanitizedObject = new Dictionary<string, object>();
         
         foreach (var prop in properties)
         {
-            var propName = prop.Name.ToLowerInvariant();
+            var propName = prop.Name;
             var value = prop.GetValue(obj);
             
             bool isSensitive = _options.SensitiveParameterKeywords.Any(keyword => 
@@ -334,11 +414,11 @@ public class DapperLoggerAttribute : AbstractInterceptorAttribute
                 
             if (isSensitive)
             {
-                sanitizedObject[prop.Name] = "***REDACTED***";
+                sanitizedObject[propName] = "***REDACTED***";
             }
             else
             {
-                sanitizedObject[prop.Name] = value;
+                sanitizedObject[propName] = value;
             }
         }
         
@@ -413,7 +493,13 @@ public static class AspectCoreExtensions
         var isDbContextName = typeName.Equals("DbContext", StringComparison.OrdinalIgnoreCase) || 
                              typeName.EndsWith("DbContext", StringComparison.OrdinalIgnoreCase);
         
-        return hasAttribute || isDbContext || isDbContextName;
+        // Check if class name ends with Repository, DataAccess, etc.
+        var isRepositoryOrDataAccess = typeName.EndsWith("Repository", StringComparison.OrdinalIgnoreCase) ||
+                                     typeName.EndsWith("DataAccess", StringComparison.OrdinalIgnoreCase) ||
+                                     typeName.EndsWith("DataService", StringComparison.OrdinalIgnoreCase) ||
+                                     typeName.EndsWith("DbService", StringComparison.OrdinalIgnoreCase);
+                                     
+        return hasAttribute || isDbContext || isDbContextName || isRepositoryOrDataAccess;
     }
     
     // StartupFilter to configure DapperLogger options at startup
@@ -545,18 +631,18 @@ public class Startup
 }
 ```
 
-## 6. Usage Examples
+## 6. Sample Repository Implementations
 
-### 6.1 Repository with Explicit Database Identifier
+### 6.1 Basic Repository with Dapper
 
 ```csharp
 using Dapper;
+using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Threading.Tasks;
 
-// Explicitly specify database identifier
-[DapperLogger("OracleDB")]
+[DapperLogger("ProductDatabase")]
 public class ProductRepository : IProductRepository
 {
     private readonly IDbConnection _connection;
@@ -568,8 +654,6 @@ public class ProductRepository : IProductRepository
     
     public async Task<IEnumerable<Product>> GetAllProductsAsync()
     {
-        // Queries that take less than MinimumLoggingThresholdMs (200ms) will not be logged
-        // Queries that take more than SlowExecutionThresholdMs (2000ms) will be logged as warnings
         return await _connection.QueryAsync<Product>("SELECT * FROM Products");
     }
     
@@ -580,16 +664,178 @@ public class ProductRepository : IProductRepository
             new { Id = id });
     }
     
+    public async Task<IEnumerable<Product>> GetProductsByCategoryAsync(int categoryId)
+    {
+        return await _connection.QueryAsync<Product>(
+            "SELECT * FROM Products WHERE CategoryId = @CategoryId",
+            new { CategoryId = categoryId });
+    }
+    
     public async Task<int> CreateProductAsync(Product product)
     {
-        return await _connection.ExecuteAsync(
-            "INSERT INTO Products (Name, Price, CategoryId) VALUES (@Name, @Price, @CategoryId)",
-            product);
+        const string sql = @"
+            INSERT INTO Products (Name, Description, Price, CategoryId, StockQuantity, CreatedAt)
+            VALUES (@Name, @Description, @Price, @CategoryId, @StockQuantity, @CreatedAt);
+            SELECT CAST(SCOPE_IDENTITY() as int)";
+            
+        return await _connection.QuerySingleAsync<int>(sql, product);
     }
+    
+    public async Task<bool> UpdateProductAsync(Product product)
+    {
+        const string sql = @"
+            UPDATE Products 
+            SET Name = @Name, 
+                Description = @Description, 
+                Price = @Price, 
+                CategoryId = @CategoryId, 
+                StockQuantity = @StockQuantity,
+                UpdatedAt = @UpdatedAt
+            WHERE Id = @Id";
+            
+        int affectedRows = await _connection.ExecuteAsync(sql, product);
+        return affectedRows > 0;
+    }
+    
+    public async Task<bool> DeleteProductAsync(int id)
+    {
+        const string sql = "DELETE FROM Products WHERE Id = @Id";
+        int affectedRows = await _connection.ExecuteAsync(sql, new { Id = id });
+        return affectedRows > 0;
+    }
+    
+    public async Task<int> GetProductCountAsync()
+    {
+        const string sql = "SELECT COUNT(*) FROM Products";
+        return await _connection.ExecuteScalarAsync<int>(sql);
+    }
+    
+    public async Task<bool> ProductExistsAsync(int id)
+    {
+        const string sql = "SELECT COUNT(1) FROM Products WHERE Id = @Id";
+        int count = await _connection.ExecuteScalarAsync<int>(sql, new { Id = id });
+        return count > 0;
+    }
+    
+    public async Task<IEnumerable<ProductSummary>> GetProductSummariesAsync()
+    {
+        const string sql = @"
+            SELECT p.Id, p.Name, p.Price, c.Name as CategoryName, 
+                   (SELECT COUNT(*) FROM OrderItems oi WHERE oi.ProductId = p.Id) as OrderCount
+            FROM Products p
+            JOIN Categories c ON p.CategoryId = c.Id";
+            
+        return await _connection.QueryAsync<ProductSummary>(sql);
+    }
+    
+    public async Task<IEnumerable<Product>> SearchProductsAsync(string searchTerm, decimal? minPrice, decimal? maxPrice)
+    {
+        string sql = "SELECT * FROM Products WHERE 1=1";
+        var parameters = new DynamicParameters();
+        
+        if (!string.IsNullOrEmpty(searchTerm))
+        {
+            sql += " AND (Name LIKE @SearchTerm OR Description LIKE @SearchTerm)";
+            parameters.Add("SearchTerm", $"%{searchTerm}%");
+        }
+        
+        if (minPrice.HasValue)
+        {
+            sql += " AND Price >= @MinPrice";
+            parameters.Add("MinPrice", minPrice.Value);
+        }
+        
+        if (maxPrice.HasValue)
+        {
+            sql += " AND Price <= @MaxPrice";
+            parameters.Add("MaxPrice", maxPrice.Value);
+        }
+        
+        return await _connection.QueryAsync<Product>(sql, parameters);
+    }
+    
+    public async Task<int> BulkInsertProductsAsync(IEnumerable<Product> products)
+    {
+        const string sql = @"
+            INSERT INTO Products (Name, Description, Price, CategoryId, StockQuantity, CreatedAt)
+            VALUES (@Name, @Description, @Price, @CategoryId, @StockQuantity, @CreatedAt)";
+            
+        return await _connection.ExecuteAsync(sql, products);
+    }
+    
+    public async Task<IEnumerable<ProductSales>> GetTopSellingProductsAsync(int count)
+    {
+        const string sql = @"
+            SELECT TOP(@Count) p.Id, p.Name, SUM(oi.Quantity) as TotalSold, SUM(oi.Quantity * oi.UnitPrice) as Revenue
+            FROM Products p
+            JOIN OrderItems oi ON p.Id = oi.ProductId
+            GROUP BY p.Id, p.Name
+            ORDER BY TotalSold DESC";
+            
+        return await _connection.QueryAsync<ProductSales>(sql, new { Count = count });
+    }
+    
+    public async Task<IEnumerable<Product>> GetProductsWithPaginationAsync(int pageNumber, int pageSize)
+    {
+        const string sql = @"
+            SELECT * FROM Products
+            ORDER BY Id
+            OFFSET @Offset ROWS
+            FETCH NEXT @PageSize ROWS ONLY";
+            
+        int offset = (pageNumber - 1) * pageSize;
+        return await _connection.QueryAsync<Product>(sql, new { Offset = offset, PageSize = pageSize });
+    }
+}
+
+public interface IProductRepository
+{
+    Task<IEnumerable<Product>> GetAllProductsAsync();
+    Task<Product> GetProductByIdAsync(int id);
+    Task<IEnumerable<Product>> GetProductsByCategoryAsync(int categoryId);
+    Task<int> CreateProductAsync(Product product);
+    Task<bool> UpdateProductAsync(Product product);
+    Task<bool> DeleteProductAsync(int id);
+    Task<int> GetProductCountAsync();
+    Task<bool> ProductExistsAsync(int id);
+    Task<IEnumerable<ProductSummary>> GetProductSummariesAsync();
+    Task<IEnumerable<Product>> SearchProductsAsync(string searchTerm, decimal? minPrice, decimal? maxPrice);
+    Task<int> BulkInsertProductsAsync(IEnumerable<Product> products);
+    Task<IEnumerable<ProductSales>> GetTopSellingProductsAsync(int count);
+    Task<IEnumerable<Product>> GetProductsWithPaginationAsync(int pageNumber, int pageSize);
+}
+
+public class Product
+{
+    public int Id { get; set; }
+    public string Name { get; set; }
+    public string Description { get; set; }
+    public decimal Price { get; set; }
+    public int CategoryId { get; set; }
+    public int StockQuantity { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime? UpdatedAt { get; set; }
+}
+
+public class ProductSummary
+{
+    public int Id { get; set; }
+    public string Name { get; set; }
+    public decimal Price { get; set; }
+    public string CategoryName { get; set; }
+    public int OrderCount { get; set; }
+}
+
+public class ProductSales
+{
+    public int Id { get; set; }
+    public string Name { get; set; }
+    public int TotalSold { get; set; }
+    public decimal Revenue { get; set; }
 }
 ```
 
-### 6.2 DbContext with Automatic Database Identification
+### 6.2 DbContext with Dapper Integration
 
 ```csharp
 using Dapper;
@@ -597,147 +843,314 @@ using Microsoft.EntityFrameworkCore;
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Linq;
 using System.Threading.Tasks;
 
 // No need to explicitly add DapperLogger attribute, will automatically use class name as identifier
-public class SalesDbContext : DbContext
+public class ApplicationDbContext : DbContext
 {
     private readonly IDbConnection _connection;
     
-    public SalesDbContext(DbContextOptions options, IDbConnection connection) 
+    // Standard DbSet properties for EF Core
+    public DbSet<Order> Orders { get; set; }
+    public DbSet<OrderItem> OrderItems { get; set; }
+    public DbSet<Customer> Customers { get; set; }
+    
+    public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options, IDbConnection connection) 
         : base(options)
     {
         _connection = connection;
     }
     
-    public async Task<IEnumerable<Sale>> GetSalesAsync(DateTime startDate)
+    // Dapper methods for optimized queries
+    public async Task<IEnumerable<OrderSummary>> GetOrderSummariesAsync(DateTime startDate, DateTime endDate)
     {
-        // Queries that take less than MinimumLoggingThresholdMs (200ms) will not be logged
-        // Queries that take more than SlowExecutionThresholdMs (2000ms) will be logged as warnings
-        return await _connection.QueryAsync<Sale>(
-            "SELECT * FROM Sales WHERE Date >= @StartDate", 
-            new { StartDate = startDate });
-    }
-    
-    public async Task<int> CreateSaleAsync(Sale sale)
-    {
-        return await _connection.ExecuteAsync(
-            "INSERT INTO Sales (Date, Amount, CustomerId, ProductId) VALUES (@Date, @Amount, @CustomerId, @ProductId)",
-            sale);
-    }
-    
-    public async Task<IEnumerable<SalesSummary>> GetSalesSummaryAsync(DateTime startDate, DateTime endDate)
-    {
-        return await _connection.QueryAsync<SalesSummary>(
-            @"SELECT 
-                ProductId, 
-                SUM(Amount) AS TotalAmount, 
-                COUNT(*) AS Count 
-              FROM Sales 
-              WHERE Date BETWEEN @StartDate AND @EndDate 
-              GROUP BY ProductId",
+        const string sql = @"
+            SELECT o.Id, o.OrderDate, c.Name as CustomerName, 
+                   COUNT(oi.Id) as ItemCount, 
+                   SUM(oi.Quantity * oi.UnitPrice) as TotalAmount
+            FROM Orders o
+            JOIN Customers c ON o.CustomerId = c.Id
+            JOIN OrderItems oi ON o.Id = oi.OrderId
+            WHERE o.OrderDate BETWEEN @StartDate AND @EndDate
+            GROUP BY o.Id, o.OrderDate, c.Name
+            ORDER BY o.OrderDate DESC";
+            
+        return await _connection.QueryAsync<OrderSummary>(
+            sql, 
             new { StartDate = startDate, EndDate = endDate });
     }
+    
+    public async Task<OrderDetails> GetOrderDetailsAsync(int orderId)
+    {
+        const string orderSql = @"
+            SELECT o.Id, o.OrderDate, o.ShippedDate, o.Status,
+                   c.Id as CustomerId, c.Name as CustomerName, c.Email, c.Phone
+            FROM Orders o
+            JOIN Customers c ON o.CustomerId = c.Id
+            WHERE o.Id = @OrderId";
+            
+        const string itemsSql = @"
+            SELECT oi.Id, oi.ProductId, p.Name as ProductName, 
+                   oi.Quantity, oi.UnitPrice, (oi.Quantity * oi.UnitPrice) as TotalPrice
+            FROM OrderItems oi
+            JOIN Products p ON oi.ProductId = p.Id
+            WHERE oi.OrderId = @OrderId";
+            
+        // Execute multiple queries in one connection
+        using (var multi = await _connection.QueryMultipleAsync(orderSql + ";" + itemsSql, new { OrderId = orderId }))
+        {
+            var order = await multi.ReadFirstOrDefaultAsync<OrderDetails>();
+            if (order != null)
+            {
+                order.Items = (await multi.ReadAsync<OrderItemDetails>()).ToList();
+            }
+            return order;
+        }
+    }
+    
+    public async Task<IEnumerable<CustomerActivity>> GetTopCustomersAsync(int count)
+    {
+        const string sql = @"
+            SELECT TOP(@Count) c.Id, c.Name, c.Email,
+                   COUNT(DISTINCT o.Id) as OrderCount,
+                   SUM(oi.Quantity * oi.UnitPrice) as TotalSpent,
+                   MAX(o.OrderDate) as LastOrderDate
+            FROM Customers c
+            JOIN Orders o ON c.Id = o.CustomerId
+            JOIN OrderItems oi ON o.Id = oi.OrderId
+            GROUP BY c.Id, c.Name, c.Email
+            ORDER BY TotalSpent DESC";
+            
+        return await _connection.QueryAsync<CustomerActivity>(sql, new { Count = count });
+    }
+    
+    public async Task<IDictionary<string, int>> GetOrderStatusDistributionAsync()
+    {
+        const string sql = @"
+            SELECT Status, COUNT(*) as Count
+            FROM Orders
+            GROUP BY Status";
+            
+        var results = await _connection.QueryAsync<StatusCount>(sql);
+        return results.ToDictionary(x => x.Status, x => x.Count);
+    }
+    
+    public async Task<bool> CreateOrderAsync(Order order, IEnumerable<OrderItem> items)
+    {
+        // Use Dapper transaction for better performance in bulk operations
+        using (var transaction = _connection.BeginTransaction())
+        {
+            try
+            {
+                // Insert order
+                const string orderSql = @"
+                    INSERT INTO Orders (CustomerId, OrderDate, Status)
+                    VALUES (@CustomerId, @OrderDate, @Status);
+                    SELECT CAST(SCOPE_IDENTITY() as int)";
+                    
+                int orderId = await _connection.QuerySingleAsync<int>(orderSql, order, transaction);
+                
+                // Insert order items
+                const string itemSql = @"
+                    INSERT INTO OrderItems (OrderId, ProductId, Quantity, UnitPrice)
+                    VALUES (@OrderId, @ProductId, @Quantity, @UnitPrice)";
+                    
+                foreach (var item in items)
+                {
+                    item.OrderId = orderId;
+                }
+                
+                await _connection.ExecuteAsync(itemSql, items, transaction);
+                
+                // Update product stock
+                const string stockSql = @"
+                    UPDATE Products
+                    SET StockQuantity = StockQuantity - @Quantity
+                    WHERE Id = @ProductId";
+                    
+                await _connection.ExecuteAsync(stockSql, items, transaction);
+                
+                transaction.Commit();
+                return true;
+            }
+            catch
+            {
+                transaction.Rollback();
+                throw;
+            }
+        }
+    }
+    
+    public async Task<IEnumerable<SalesReport>> GetMonthlySalesReportAsync(int year)
+    {
+        const string sql = @"
+            SELECT 
+                MONTH(o.OrderDate) as Month,
+                SUM(oi.Quantity * oi.UnitPrice) as Revenue,
+                COUNT(DISTINCT o.Id) as OrderCount,
+                COUNT(DISTINCT o.CustomerId) as CustomerCount,
+                AVG(oi.Quantity * oi.UnitPrice) as AverageOrderValue
+            FROM Orders o
+            JOIN OrderItems oi ON o.Id = oi.OrderId
+            WHERE YEAR(o.OrderDate) = @Year
+            GROUP BY MONTH(o.OrderDate)
+            ORDER BY Month";
+            
+        return await _connection.QueryAsync<SalesReport>(sql, new { Year = year });
+    }
+    
+    public async Task<DashboardStats> GetDashboardStatsAsync()
+    {
+        const string sql = @"
+            SELECT 
+                (SELECT COUNT(*) FROM Orders WHERE Status = 'Pending') as PendingOrders,
+                (SELECT COUNT(*) FROM Orders WHERE OrderDate >= DATEADD(day, -30, GETDATE())) as RecentOrders,
+                (SELECT COUNT(*) FROM Customers) as TotalCustomers,
+                (SELECT COUNT(*) FROM Products WHERE StockQuantity < 10) as LowStockProducts,
+                (SELECT SUM(oi.Quantity * oi.UnitPrice) FROM OrderItems oi JOIN Orders o ON oi.OrderId = o.Id WHERE o.OrderDate >= DATEADD(day, -30, GETDATE())) as MonthlyRevenue,
+                (SELECT COUNT(*) FROM Products) as TotalProducts";
+                
+        return await _connection.QuerySingleAsync<DashboardStats>(sql);
+    }
+}
+
+public class OrderSummary
+{
+    public int Id { get; set; }
+    public DateTime OrderDate { get; set; }
+    public string CustomerName { get; set; }
+    public int ItemCount { get; set; }
+    public decimal TotalAmount { get; set; }
+}
+
+public class OrderDetails
+{
+    public int Id { get; set; }
+    public DateTime OrderDate { get; set; }
+    public DateTime? ShippedDate { get; set; }
+    public string Status { get; set; }
+    public int CustomerId { get; set; }
+    public string CustomerName { get; set; }
+    public string Email { get; set; }
+    public string Phone { get; set; }
+    public List<OrderItemDetails> Items { get; set; }
+}
+
+public class OrderItemDetails
+{
+    public int Id { get; set; }
+    public int ProductId { get; set; }
+    public string ProductName { get; set; }
+    public int Quantity { get; set; }
+    public decimal UnitPrice { get; set; }
+    public decimal TotalPrice { get; set; }
+}
+
+public class CustomerActivity
+{
+    public int Id { get; set; }
+    public string Name { get; set; }
+    public string Email { get; set; }
+    public int OrderCount { get; set; }
+    public decimal TotalSpent { get; set; }
+    public DateTime LastOrderDate { get; set; }
+}
+
+public class StatusCount
+{
+    public string Status { get; set; }
+    public int Count { get; set; }
+}
+
+public class SalesReport
+{
+    public int Month { get; set; }
+    public decimal Revenue { get; set; }
+    public int OrderCount { get; set; }
+    public int CustomerCount { get; set; }
+    public decimal AverageOrderValue { get; set; }
+}
+
+public class DashboardStats
+{
+    public int PendingOrders { get; set; }
+    public int RecentOrders { get; set; }
+    public int TotalCustomers { get; set; }
+    public int LowStockProducts { get; set; }
+    public decimal MonthlyRevenue { get; set; }
+    public int TotalProducts { get; set; }
+}
+
+public class Order
+{
+    public int Id { get; set; }
+    public int CustomerId { get; set; }
+    public DateTime OrderDate { get; set; }
+    public DateTime? ShippedDate { get; set; }
+    public string Status { get; set; }
+    
+    // Navigation properties
+    public Customer Customer { get; set; }
+    public ICollection<OrderItem> Items { get; set; }
+}
+
+public class OrderItem
+{
+    public int Id { get; set; }
+    public int OrderId { get; set; }
+    public int ProductId { get; set; }
+    public int Quantity { get; set; }
+    public decimal UnitPrice { get; set; }
+    
+    // Navigation properties
+    public Order Order { get; set; }
+}
+
+public class Customer
+{
+    public int Id { get; set; }
+    public string Name { get; set; }
+    public string Email { get; set; }
+    public string Phone { get; set; }
+    public string Address { get; set; }
+    
+    // Navigation properties
+    public ICollection<Order> Orders { get; set; }
 }
 ```
 
-### 6.3 Service with Database Interface Injection
+## 7. Summary and Key Features
 
-```csharp
-using Dapper;
-using System;
-using System.Collections.Generic;
-using System.Data;
-using System.Threading.Tasks;
+This comprehensive implementation provides a robust solution for logging Dapper database operations with the following features:
 
-public interface ICustomerDatabaseService
-{
-    Task<Customer> GetCustomerByIdAsync(int id);
-    Task<IEnumerable<Customer>> FindCustomersByNameAsync(string namePattern);
-    Task<int> UpdateCustomerAsync(Customer customer);
-}
+1. **Extensive Method Detection**:
+   - Comprehensive list of Dapper method names for better detection
+   - Support for repository pattern method naming conventions
+   - Automatic detection of database-related methods in repository classes
+   - SQL statement validation to ensure we're logging actual SQL queries
 
-[DapperLogger("CustomerDB")]
-public class CustomerDatabaseService : ICustomerDatabaseService
-{
-    private readonly IDbConnection _connection;
-    
-    public CustomerDatabaseService(IDbConnection connection)
-    {
-        _connection = connection;
-    }
-    
-    public async Task<Customer> GetCustomerByIdAsync(int id)
-    {
-        return await _connection.QueryFirstOrDefaultAsync<Customer>(
-            "SELECT * FROM Customers WHERE Id = @Id",
-            new { Id = id });
-    }
-    
-    public async Task<IEnumerable<Customer>> FindCustomersByNameAsync(string namePattern)
-    {
-        return await _connection.QueryAsync<Customer>(
-            "SELECT * FROM Customers WHERE Name LIKE @NamePattern",
-            new { NamePattern = $"%{namePattern}%" });
-    }
-    
-    public async Task<int> UpdateCustomerAsync(Customer customer)
-    {
-        return await _connection.ExecuteAsync(
-            @"UPDATE Customers 
-              SET Name = @Name, Email = @Email, Address = @Address, Phone = @Phone
-              WHERE Id = @Id",
-            customer);
-    }
-}
-```
+2. **Smart Logging Behavior**:
+   - Skip logging queries faster than 200ms (configurable) to reduce noise
+   - Log slow queries (> 2000ms) as warnings for easy identification
+   - Always log errors regardless of execution time
+   - Clear log messages with execution time, method name, database identifier, and SQL
 
-## 7. Log Output Examples
+3. **Enhanced Parameter Handling**:
+   - Better detection of parameter objects
+   - Support for dictionaries, anonymous types, and complex objects
+   - Proper sanitization of sensitive information based on configurable keywords
+   - Protection against logging issues affecting main application flow
 
-With the minimum logging threshold set to 200ms, the logging behavior will be:
+4. **Flexible Configuration**:
+   - Configurable minimum logging threshold (default 200ms)
+   - Configurable slow execution threshold (default 2000ms)
+   - Configurable SQL length limit (default 4096 characters)
+   - Customizable sensitive parameter keywords
 
-1. **Fast Queries (< 200ms)**:
-   - Not logged at all (unless an exception occurs)
+5. **Database Identification**:
+   - Explicit via attribute: `[DapperLogger("DatabaseName")]`
+   - Automatic for DbContext classes
+   - Clear display in logs: `[DatabaseName] Method: Class.Method`
 
-2. **Normal Queries (200ms - 2000ms)**:
-   ```
-   [10:15:30 INF] Dapper executed in 450ms. [OracleDB] Method: ProductRepository.GetAllProductsAsync, SQL: SELECT * FROM Products, Parameters: {}
-   ```
-
-3. **Slow Queries (> 2000ms)**:
-   ```
-   [10:16:05 WRN] Slow Dapper execution detected! Executed in 3542ms (threshold: 2000ms). [SalesDbContext] Method: SalesDbContext.GetSalesSummaryAsync, SQL: SELECT ProductId, SUM(Amount) AS TotalAmount, COUNT(*) AS Count FROM Sales WHERE Date BETWEEN @StartDate AND @EndDate GROUP BY ProductId, Parameters: { "StartDate": "2023-01-01", "EndDate": "2023-12-31" }
-   ```
-
-4. **Error Cases (any duration)**:
-   ```
-   [10:17:12 ERR] Error executing Dapper in 123ms. [CustomerDB] Method: CustomerDatabaseService.GetCustomerByIdAsync, SQL: SELECT * FROM Customers WHERE Id = @Id, Parameters: { "Id": 123 }
-   System.Data.SqlClient.SqlException (0x80131904): Invalid column name 'InvalidColumn'.
-   ```
-
-## 8. Summary and Key Features
-
-This implementation provides a comprehensive solution for logging Dapper database operations with the following key features:
-
-1. **Performance-Based Logging**:
-   - Queries faster than 200ms are not logged (configurable)
-   - Slow queries (> 2000ms) are logged as warnings
-   - All errors are logged regardless of execution time
-
-2. **Database Identification**:
-   - Explicit identification via attribute parameter: `[DapperLogger("DatabaseName")]`
-   - Automatic identification for DbContext classes using class name
-
-3. **Privacy and Security**:
-   - Sensitive parameters are automatically redacted
-   - SQL statements are truncated to avoid excessive log size
-
-4. **Configurability**:
-   - All thresholds and settings are configurable via appsettings.json
-   - Customizable list of sensitive parameter keywords
-
-5. **Integration**:
-   - Seamlessly integrates with AspectCore for AOP
-   - Works with both EF Core DbContext and standard Dapper usage
-
-This implementation strikes a balance between providing enough information for monitoring and troubleshooting while avoiding excessive logging that could impact performance or storage.
+This implementation provides comprehensive coverage of Dapper-related methods while maintaining good performance by avoiding excessive logging. It's ideal for monitoring database performance in production environments and quickly identifying slow queries or problematic operations.
