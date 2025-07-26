@@ -58,6 +58,57 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
+/// <summary>
+/// Provides automatic logging for Dapper database operations using AOP (Aspect-Oriented Programming).
+/// This attribute intercepts method calls to Dapper's data access methods and records detailed execution
+/// information with minimal performance impact.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The attribute captures and logs essential information about database operations:
+/// - SQL statements being executed
+/// - Parameter values (with sensitive data protection)
+/// - Execution time
+/// - Database identifier for multi-database environments
+/// - Errors and exceptions
+/// </para>
+/// <para>
+/// Key features include:
+/// - Performance-based logging with configurable thresholds for minimum logging and slow query warnings
+/// - Smart method detection for Dapper operations through extensive method name matching
+/// - Database identification through attribute parameter or automatic class name detection for DbContext
+/// - Privacy protection through parameter sanitization of sensitive information
+/// - Minimal overhead using ThreadLocal resources and conditional logging
+/// </para>
+/// <para>
+/// This attribute can be applied to classes or interfaces that use Dapper for data access.
+/// If applied to a class, all Dapper methods in that class will be logged.
+/// If applied to an interface, all implementations of that interface will have their Dapper methods logged.
+/// </para>
+/// <para>
+/// For DbContext classes or classes with names ending in "DbContext", the class name will automatically
+/// be used as the database identifier unless explicitly specified.
+/// </para>
+/// </remarks>
+/// <example>
+/// Basic usage with explicit database name:
+/// <code>
+/// [DapperLogger("OrdersDatabase")]
+/// public class OrderRepository
+/// {
+///     // Dapper methods will be automatically logged
+/// }
+/// </code>
+/// 
+/// Automatic database identification with DbContext:
+/// <code>
+/// // Class name will be used as database identifier
+/// public class ProductDbContext : DbContext
+/// {
+///     // Dapper methods will be automatically logged
+/// }
+/// </code>
+/// </example>
 [AttributeUsage(AttributeTargets.Class | AttributeTargets.Interface)]
 public class DapperLoggerAttribute : AbstractInterceptorAttribute
 {
