@@ -1,0 +1,563 @@
+*Thinking...*
+
+> **Processing User's Needs**
+> 
+> I'm now delving into the specific request. It appears the user needs the existing C# solution's comments translated from Chinese to English and expanded, especially within the `HttpClient` section. My focus is on clarifying the code's functionality to improve understanding and maintenance.
+> 
+> 
+> **Elaborating Code Comments**
+> 
+> I'm currently focusing on deconstructing the task at hand. My immediate goal is to translate and expand comments. I'm starting with `HttpCallerInfo.cs`, noting the significance of `AsyncLocal<T>` and the need for clarifying its usage within async flows. Next, I'll proceed with `HttpCallerInfoAttribute.cs`, paying close attention to the explanations needed for `AbstractInterceptorAttribute` and the `Invoke` method, especially the imperative `finally` block.
+> 
+> 
+> **Dissecting `HttpLoggingHandler.cs`**
+> 
+> I'm now deep into the `HttpLoggingHandler.cs` file. My plan is to meticulously translate and add clarity, section by section. The constructor's simple DI setup is understood. I'm starting on the `SendAsync` method, deconstructing the stopwatch and `try/catch/finally` structure to provide a robust and clear explanation for the user. Emphasis is placed on ensuring clarity about error handling.
+> 
+> 
+> **Mapping Out The Steps**
+> 
+> I've now reviewed the task thoroughly and created a structured plan. This will guide the comment translation and expansion process. I'm focusing on `HttpLoggingHandler.cs` next, breaking down its methods and logic into manageable chunks. I will make sure all details and decisions are reflected in the comments to improve the users' comprehension.
+> 
+> 
+> **Clarifying `HttpLoggingHandler` Focus**
+> 
+> I'm currently prioritizing the meticulous breakdown of `HttpLoggingHandler.cs`. I've clarified the class's role within the `HttpClient` pipeline. I've detailed its constructor's dependency injection and the core function of the `SendAsync` method. I'm meticulously explaining each step, especially the `try/catch/finally` structure and its significance, as well as the purpose of exception handling. Next up: `LogHttpCall` and the details of its structured logging approach.
+> 
+> 
+> **Structuring The Plan**
+> 
+> I've outlined the task's requirements thoroughly. I will proceed with file-by-file processing, including commenting each C# file. I am now set to begin translating and enriching the code's comments, with a focus on `HttpLoggingHandler.cs`, which will involve breaking it down method-by-method. The goal is to provide comprehensive details of its functionality for the user.
+> 
+> 
+> **Translating And Elaborating**
+> 
+> I'm currently starting the file-by-file process. Beginning with `HttpCallerInfo.cs`, I'm focusing on translating comments and highlighting the importance of `AsyncLocal<T>` for managing context within asynchronous operations. Next, I'll address `HttpCallerInfoAttribute.cs` to clarify the role of `AbstractInterceptorAttribute` and the significance of the `finally` block in the `Invoke` method, which addresses thread safety.
+> 
+> 
+Of course! Here is the complete, final version of the solution with all comments translated to English. I have paid special attention to `HttpLoggingHandler.cs`, adding more detailed explanations to clarify the purpose and mechanics of each part, as you requested.
+
+---
+
+### Project Structure Overview
+
+```
+/YourProject
+|-- HttpLogging/
+|   |-- HttpCallerInfo.cs               # (For passing caller info across async boundaries)
+|   |-- HttpCallerInfoAttribute.cs      # (The AOP interceptor to get the method name)
+|   |-- HttpLoggingHandler.cs           # (The core HttpClient interceptor with detailed comments)
+|   |-- HttpLoggingHandlerOptions.cs    # (Configuration options for logging)
+|   |-- HttpLoggingExtensions.cs        # (DI extension methods for easy setup)
+|
+|-- Services/
+|   |-- IGitHubApiService.cs            # (Interface for the example service)
+|   |-- GitHubApiService.cs             # (Implementation of the service, follows naming convention)
+|
+|-- appsettings.json
+|-- Program.cs
+```
+
+---
+
+### 1. `HttpLogging/HttpCallerInfo.cs`
+
+This static class uses `AsyncLocal<T>` to safely carry the caller's method name across asynchronous call chains.
+
+```csharp
+namespace YourProject.HttpLogging;
+
+/// <summary>
+/// Provides a mechanism to flow HTTP caller information across asynchronous operations.
+/// </summary>
+public static class HttpCallerInfo
+{
+    /// <summary>
+    /// Stores the caller's method name using AsyncLocal<T>.
+    /// This is crucial for async/await scenarios, as it ensures the value is "flowed"
+    /// with the logical call stack, even when the code execution switches threads.
+    /// This prevents the data from one request from leaking into another.
+    /// </summary>
+    public static readonly AsyncLocal<string> CallerMethodName = new();
+}
+```
+
+### 2. `HttpLogging/HttpCallerInfoAttribute.cs`
+
+This is the AOP interceptor. It populates and clears the `AsyncLocal` value before and after the target method executes.
+
+```csharp
+using AspectCore.DynamicProxy;
+
+namespace YourProject.HttpLogging;
+
+/// <summary>
+/// An AOP interceptor that captures and stores the name of the method that initiated an HTTP call.
+/// It places the method name into an AsyncLocal variable, making it accessible to the HttpLoggingHandler later in the pipeline.
+/// </summary>
+[AttributeUsage(AttributeTargets.Class | AttributeTargets.Method)]
+public class HttpCallerInfoAttribute : AbstractInterceptorAttribute
+{
+    public override async Task Invoke(AspectContext context, AspectDelegate next)
+    {
+        // Construct the full method name (e.g., "GitHubApiService.GetUserInfoAsync").
+        var callerMethodName = $"{context.ImplementationMethod.DeclaringType?.Name}.{context.ImplementationMethod.Name}";
+
+        // Set the method name in the AsyncLocal storage.
+        HttpCallerInfo.CallerMethodName.Value = callerMethodName;
+
+        try
+        {
+            // Proceed to execute the original method (e.g., GetUserInfoAsync).
+            await next(context);
+        }
+        finally
+        {
+            // CRITICAL: Clear the AsyncLocal value after the method has completed.
+            // This prevents the value from "leaking" into the next operation that might
+            // run on the same thread from the thread pool.
+            HttpCallerInfo.CallerMethodName.Value = null;
+        }
+    }
+}
+```
+
+### 3. `HttpLogging/HttpLoggingHandlerOptions.cs`
+
+This class defines all the configurable options for the logging handler.
+
+```csharp
+namespace YourProject.HttpLogging;
+
+/// <summary>
+/// Provides configuration options for the HttpLoggingHandler.
+/// </summary>
+public class HttpLoggingHandlerOptions
+{
+    /// <summary>
+    /// The execution time threshold in milliseconds for a request to be considered "slow".
+    /// Requests exceeding this duration will be logged as a Warning. Defaults to 2000ms.
+    /// </summary>
+    public int SlowExecutionThresholdMs { get; set; } = 2000;
+
+    /// <summary>
+    /// Gets or sets a value indicating whether to log the request body.
+    /// WARNING: Enabling this can expose sensitive information and generate large log volumes. Defaults to false.
+    /// </summary>
+    public bool LogRequestBody { get; set; } = false;
+
+    /// <summary>
+    /// Gets or sets a value indicating whether to log the response body.
+    /// WARNING: Enabling this can expose sensitive information and generate large log volumes. Defaults to false.
+    /// </summary>
+    public bool LogResponseBody { get; set; } = false;
+
+    /// <summary>
+    /// The maximum length of the body content to log. Content exceeding this length will be truncated.
+    /// Defaults to 4096 characters.
+    /// </summary>
+    public int MaxBodyLength { get; set; } = 4096;
+    
+    /// <summary>
+    /// A collection of keywords used to identify sensitive headers that should be redacted from logs.
+    /// The matching is case-insensitive. Defaults to "Authorization", "Cookie", "ApiKey", "Secret".
+    /// </summary>
+    public string[] SensitiveHeaderKeywords { get; set; } = new string[] 
+    { 
+        "Authorization", "Cookie", "ApiKey", "Secret" 
+    };
+}
+```
+
+### 4. `HttpLogging/HttpLoggingHandler.cs` (With Extra Comments)
+
+This is the core of the interceptor, responsible for timing, content reading, sanitization, and structured logging.
+
+```csharp
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Serilog.Events;
+using System.Diagnostics;
+using System.Net.Http.Headers;
+using System.Text;
+
+namespace YourProject.HttpLogging;
+
+/// <summary>
+/// A DelegatingHandler that intercepts HttpClient requests to log detailed diagnostic information.
+/// It captures execution time, originating method, request/response details, and errors,
+/// providing a comprehensive view of HTTP interactions.
+/// </summary>
+public class HttpLoggingHandler : DelegatingHandler
+{
+    private readonly HttpLoggingHandlerOptions _options;
+    private readonly ILogger<HttpLoggingHandler> _logger;
+
+    public HttpLoggingHandler(IOptions<HttpLoggingHandlerOptions> options, ILogger<HttpLoggingHandler> logger)
+    {
+        _options = options.Value;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// The main interception point for the HTTP request pipeline.
+    /// </summary>
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        // Start a stopwatch to measure the duration of the entire HTTP call.
+        var stopwatch = Stopwatch.StartNew();
+        HttpResponseMessage response = null;
+        Exception exception = null;
+
+        // The try/catch/finally block is a robust pattern to ensure logging occurs
+        // regardless of the outcome of the HTTP call.
+        try
+        {
+            // Pass the request to the next handler in the pipeline (or to the network).
+            // This is the actual execution of the HTTP request.
+            response = await base.SendAsync(request, cancellationToken);
+            return response;
+        }
+        catch (Exception ex)
+        {
+            // If an exception occurs (e.g., network error, DNS failure), capture it.
+            exception = ex;
+            // It's crucial to re-throw the exception to not alter the application's behavior.
+            // 'throw;' preserves the original stack trace.
+            throw;
+        }
+        finally
+        {
+            // This block is guaranteed to execute, whether the call succeeded, failed, or threw an exception.
+            stopwatch.Stop();
+            
+            // Unconditionally log the call details. The previous check for MinimumLoggingThresholdMs has been removed.
+            await LogHttpCall(request, response, stopwatch.ElapsedMilliseconds, exception);
+        }
+    }
+
+    /// <summary>
+    /// Orchestrates the logging of the completed HTTP call.
+    /// </summary>
+    private async Task LogHttpCall(HttpRequestMessage request, HttpResponseMessage response, long elapsedMs, Exception exception)
+    {
+        // A defensive try/catch block to prevent an error during logging from crashing the application.
+        try
+        {
+            // Determine the appropriate log level based on the outcome.
+            // - Error: If an exception occurred or the HTTP status code indicates failure (>= 400).
+            // - Warning: If the call was successful but slower than the configured threshold.
+            // - Information: For all other successful calls.
+            var logLevel = exception != null || (response != null && !response.IsSuccessStatusCode) ? LogEventLevel.Error :
+                           elapsedMs > _options.SlowExecutionThresholdMs ? LogEventLevel.Warning :
+                           LogEventLevel.Information;
+
+            // Retrieve the caller's method name from AsyncLocal.
+            // The null-coalescing operator provides a fallback if the value was not set (e.g., AOP is not configured).
+            var callerMethodName = HttpCallerInfo.CallerMethodName.Value ?? "Unknown";
+
+            // Read request and response bodies only if configured to do so.
+            var requestBody = _options.LogRequestBody ? await ReadAndTruncateBodyAsync(request.Content) : "[Request Body Not Logged]";
+            var responseBody = _options.LogResponseBody ? await ReadAndTruncateBodyAsync(response?.Content) : "[Response Body Not Logged]";
+
+            // Sanitize headers to remove sensitive information.
+            var requestHeaders = SanitizeHeaders(request.Headers);
+            var responseHeaders = response != null ? SanitizeHeaders(response.Headers) : null;
+
+            // Create an anonymous object to hold all the contextual data for structured logging.
+            // This allows logging providers like Serilog to treat the data as first-class properties.
+            var logContext = new
+            {
+                CallerMethodName = callerMethodName,
+                RequestMethod = request.Method.Method,
+                RequestUri = request.RequestUri,
+                RequestHeaders = requestHeaders,
+                RequestBody = requestBody,
+                StatusCode = (int?)response?.StatusCode,
+                ReasonPhrase = response?.ReasonPhrase,
+                ResponseHeaders = responseHeaders,
+                ResponseBody = responseBody,
+                ElapsedMilliseconds = elapsedMs
+            };
+
+            var messageTemplate = "HTTP call from {CallerMethodName} finished in {ElapsedMilliseconds}ms.";
+            
+            // Log with the determined level and context.
+            // The '@' symbol in '{@HttpCallContext}' tells Serilog to serialize the entire object.
+            if (logLevel == LogEventLevel.Error)
+            {
+                _logger.LogError(exception, messageTemplate + " Status: {StatusCode}. {@HttpCallContext}", 
+                    callerMethodName, elapsedMs, logContext.StatusCode, logContext);
+            }
+            else if (logLevel == LogEventLevel.Warning)
+            {
+                _logger.LogWarning(messageTemplate + " (Slow). {@HttpCallContext}", 
+                    callerMethodName, elapsedMs, logContext);
+            }
+            else
+            {
+                _logger.LogInformation(messageTemplate + " {@HttpCallContext}", 
+                    callerMethodName, elapsedMs, logContext);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "A critical error occurred within the HttpLoggingHandler itself.");
+        }
+    }
+
+    /// <summary>
+    /// Creates a dictionary of headers, redacting any that are considered sensitive.
+    /// </summary>
+    private Dictionary<string, string> SanitizeHeaders(HttpHeaders headers)
+    {
+        if (headers == null) return null;
+        return headers.ToDictionary(
+            h => h.Key,
+            h => _options.SensitiveHeaderKeywords.Any(k => h.Key.Contains(k, StringComparison.OrdinalIgnoreCase))
+                 ? "***REDACTED***"
+                 : string.Join(", ", h.Value)
+        );
+    }
+
+    /// <summary>
+    /// Safely reads the content of an HttpContent stream and truncates it if necessary.
+    /// </summary>
+    private async Task<string> ReadAndTruncateBodyAsync(HttpContent content)
+    {
+        if (content == null) return null;
+
+        // THE CRITICAL STEP: HttpContent streams are forward-only and can typically be read only once.
+        // `LoadIntoBufferAsync` copies the stream's content into an in-memory buffer,
+        // making the stream seekable and readable multiple times.
+        await content.LoadIntoBufferAsync();
+        var contentStream = await content.ReadAsStreamAsync();
+        
+        // Use a StreamReader to read the buffered stream.
+        // 'leaveOpen: true' is important to prevent the reader from disposing the underlying stream.
+        using var reader = new StreamReader(contentStream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, bufferSize: 1024, leaveOpen: true);
+        var body = await reader.ReadToEndAsync();
+        
+        // After reading, reset the stream's position to the beginning.
+        // This allows the original caller of the HttpClient (your application code) to read the stream as if nothing happened.
+        if (contentStream.CanSeek)
+        {
+            contentStream.Position = 0;
+        }
+
+        // Truncate the body if it exceeds the configured maximum length to avoid overly large log entries.
+        return body.Length > _options.MaxBodyLength
+            ? body[.._options.MaxBodyLength] + "... [TRUNCATED]"
+            : body;
+    }
+}
+```
+
+### 5. `HttpLogging/HttpLoggingExtensions.cs`
+
+These extension methods provide a clean, fluent API for registering the logging components in `Program.cs`.
+
+```csharp
+using AspectCore.Configuration;
+using AspectCore.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using System.Reflection;
+using YourProject.HttpLogging;
+
+public static class HttpLoggingExtensions
+{
+    /// <summary>
+    /// Registers convention-based HTTP caller information tracking for the application.
+    /// This method configures an AOP interceptor to be automatically applied to classes
+    /// whose names end with "Service" or "HttpClient".
+    /// </summary>
+    public static IServiceCollection AddHttpCallerInfoTracking(this IServiceCollection services)
+    {
+        services.ConfigureDynamicProxy(config =>
+        {
+            config.Interceptors.AddTyped<HttpCallerInfoAttribute>(method =>
+            {
+                var type = method?.DeclaringType;
+                if (type == null) return false;
+
+                // Convention: Apply interceptor if class name ends with "Service" or "HttpClient" (case-insensitive).
+                return type.Name.EndsWith("Service", StringComparison.OrdinalIgnoreCase) ||
+                       type.Name.EndsWith("HttpClient", StringComparison.OrdinalIgnoreCase);
+            });
+        });
+        
+        // Register the interceptor attribute itself so it can be resolved by the DI container.
+        services.AddSingleton<HttpCallerInfoAttribute>();
+        return services;
+    }
+
+    /// <summary>
+    /// Adds the HttpLoggingHandler to an HttpClient pipeline.
+    /// </summary>
+    /// <param name="builder">The IHttpClientBuilder to configure.</param>
+    /// <param name="configureOptions">An action to configure the HttpLoggingHandlerOptions.</param>
+    public static IHttpClientBuilder AddHttpLoggingHandler(
+        this IHttpClientBuilder builder, 
+        Action<HttpLoggingHandlerOptions> configureOptions)
+    {
+        var services = builder.Services;
+        
+        // Configure the options specifically for this named/typed HttpClient.
+        // 'builder.Name' is the unique key for the client's configuration.
+        services.Configure(builder.Name, configureOptions);
+        
+        // Add the HttpLoggingHandler to the message handler pipeline.
+        builder.AddHttpMessageHandler(sp => 
+        {
+            // IOptionsMonitor allows retrieving named options configurations.
+            var optionsMonitor = sp.GetRequiredService<IOptionsMonitor<HttpLoggingHandlerOptions>>();
+            // Get the specific options instance associated with this HttpClient's name.
+            var options = optionsMonitor.Get(builder.Name); 
+            var logger = sp.GetRequiredService<ILogger<HttpLoggingHandler>>();
+            
+            return new HttpLoggingHandler(Options.Create(options), logger);
+        });
+
+        return builder;
+    }
+}
+```
+
+### 6. `Services/IGitHubApiService.cs` & `GitHubApiService.cs`
+
+An example service whose class name `GitHubApiService` matches our naming convention, so it will be intercepted automatically without needing any attributes.
+
+```csharp
+// Services/IGitHubApiService.cs
+namespace YourProject.Services;
+
+public interface IGitHubApiService
+{
+    Task<string> GetUserInfoAsync(string username);
+}
+
+// Services/GitHubApiService.cs
+namespace YourProject.Services;
+
+public class GitHubApiService : IGitHubApiService
+{
+    private readonly HttpClient _httpClient;
+
+    public GitHubApiService(HttpClient httpClient)
+    {
+        _httpClient = httpClient;
+    }
+
+    // This method will be automatically intercepted by our AOP setup
+    // because its class name ends with "Service".
+    public async Task<string> GetUserInfoAsync(string username)
+    {
+        var response = await _httpClient.GetAsync($"/users/{username}");
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadAsStringAsync();
+    }
+}
+```
+
+### 7. `appsettings.json`
+
+Centralized configuration for logging.
+
+```json
+{
+  "Serilog": {
+    "MinimumLevel": {
+      "Default": "Information",
+      "Override": {
+        "Microsoft": "Warning",
+        "System": "Warning"
+      }
+    },
+    "WriteTo": [
+      {
+        "Name": "Console",
+        "Args": {
+          "outputTemplate": "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}"
+        }
+      }
+    ]
+  },
+  "HttpLogging": {
+    "SlowExecutionThresholdMs": 1000,
+    "LogRequestBody": true,
+    "LogResponseBody": true,
+    "MaxBodyLength": 2048
+  },
+  "AllowedHosts": "*"
+}
+```
+
+### 8. `Program.cs` (Final Integration)
+
+The entry point that wires everything together.
+
+```csharp
+using AspectCore.Extensions.DependencyInjection;
+using Serilog;
+using YourProject.Services;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Step 1: Configure Serilog for structured logging.
+builder.Host.UseSerilog((context, config) => 
+    config.ReadFrom.Configuration(context.Configuration));
+
+// Step 2: Enable convention-based HTTP caller info tracking (AOP).
+builder.Services.AddHttpCallerInfoTracking();
+
+// Step 3: Register a Typed HttpClient and attach our logging handler.
+builder.Services.AddHttpClient<IGitHubApiService, GitHubApiService>(client =>
+{
+    client.BaseAddress = new Uri("https://api.github.com/");
+    client.DefaultRequestHeaders.Add("User-Agent", "My-Awesome-App");
+    client.DefaultRequestHeaders.Add("Accept", "application/vnd.github.v3+json");
+})
+.AddHttpLoggingHandler(options => 
+    // Bind the "HttpLogging" section from appsettings.json to the options object.
+    builder.Configuration.GetSection("HttpLogging").Bind(options)
+);
+
+// Step 4: Enable dynamic proxy generation by AspectCore.
+// This is required for the AOP interceptors to work.
+builder.Host.UseDynamicProxy();
+
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+var app = builder.Build();
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseHttpsRedirection();
+
+// Create a simple API endpoint to trigger our service.
+app.MapGet("/github/user/{username}", async (string username, IGitHubApiService gitHubService) =>
+{
+    try
+    {
+        var userInfo = await gitHubService.GetUserInfoAsync(username);
+        return Results.Content(userInfo, "application/json");
+    }
+    catch (HttpRequestException ex)
+    {
+        return Results.Problem(
+            detail: ex.Message,
+            statusCode: (int?)ex.StatusCode
+        );
+    }
+});
+
+app.Run();
+```
