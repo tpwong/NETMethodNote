@@ -169,9 +169,56 @@ using System.Threading;
 using System.Threading.Tasks;
 
 /// <summary>
-/// An interceptor attribute that provides automatic logging for Dapper database operations using AOP.
-/// It captures SQL, parameters, execution time, and errors for methods in decorated classes.
+/// Provides powerful, automatic logging for Dapper database operations using an AOP-based interceptor.
+/// This attribute is the core of the logging system, designed to give deep observability into the data access layer
+/// with minimal configuration and no changes to existing business logic. It captures essential diagnostics
+/// such as SQL statements, parameters, execution timings, and any exceptions that occur.
 /// </summary>
+/// <remarks>
+/// <para><strong>Primary Purpose:</strong> To help developers debug data access issues, monitor database performance, 
+/// and audit SQL queries without manually adding logging code to every repository method. It follows the "Convention over Configuration"
+/// principle to simplify integration.</para>
+/// 
+/// <para><strong>How It Works:</strong> The attribute can be applied to a class or an interface. When the application starts,
+/// the AOP framework creates a proxy for the decorated type. This interceptor then wraps method calls that match specific criteria,
+/// allowing it to execute logic before and after the original method runs.</para>
+/// 
+/// <para><strong>Method Detection Logic:</strong></para>
+/// <list type="number">
+///   <item>
+///     <description><strong>Explicit Decoration:</strong> Any class or interface marked with `[DapperLogger]` is a target.</description>
+///   </item>
+///   <item>
+///     <description><strong>Heuristic Detection (Enabled by Default):</strong> It automatically targets classes whose names end with common
+///     data access suffixes (e.g., "Repository", "DataAccess", "DbContext"). This significantly reduces the need for explicit attributes across a project.</description>
+///   </item>
+///   <item>
+///     <description><strong>Method Name Matching:</strong> Within a target class, it only intercepts methods whose names begin with
+///     common database operation prefixes (e.g., "Query", "Execute", "Get", "Update", "Save"). This is performed efficiently using a Trie data structure.</description>
+///   </item>
+/// </list>
+/// 
+/// <para><strong>Key Features:</strong></para>
+/// <list type="bullet">
+///   <item><description><strong>Performance Timing:</strong> Logs the exact execution time of each query and flags slow operations.</description></item>
+///   <item><description><strong>Parameter Sanitization:</strong> Automatically redacts sensitive data (like passwords, tokens) from logged parameters to enhance security.</description></item>
+///   <item><description><strong>Structured Logging:</strong> Outputs logs in a structured format (via Serilog) with distinct properties for `ElapsedMilliseconds`, `SQL`, `Parameters`, etc., making them easy to query and analyze.</description></item>
+///   <item><description><strong>Highly Configurable:</strong> Behavior such as logging thresholds, slow query warnings, and sensitive keywords can be easily configured in `appsettings.json` via the `DapperLoggerOptions` class.</description></item>
+///   <item><description><strong>Performance-Oriented:</strong> Uses optimizations like `ThreadLocal<Stopwatch>`, reflection caching, and a high-speed Trie to ensure the logging overhead is negligible in production environments.</description></item>
+/// </list>
+/// 
+/// <example>
+/// To use, simply add the attribute to your repository or its interface:
+/// <code>
+/// [DapperLogger("PrimaryDatabase")]
+/// public class ProductRepository : IProductRepository
+/// {
+///     // ... methods like GetProductByIdAsync, UpdateProductAsync, etc. will be logged automatically.
+/// }
+/// </code>
+/// Or, rely on heuristic detection by naming your class `ProductRepository` without an attribute, and it will still be intercepted if the feature is enabled.
+/// </example>
+/// </remarks>
 [AttributeUsage(AttributeTargets.Class | AttributeTargets.Interface)]
 public class DapperLoggerAttribute : AbstractInterceptorAttribute
 {
