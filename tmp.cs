@@ -1,13 +1,6 @@
 -- 說明:
--- 這個優化版本使用多個 CTEs 來分解原始的複雜查詢，以提高可讀性和可維護性。
--- 1. Player: 與原始查詢相同，用於分塊選取玩家。
--- 2. TransactionsToExclude: 獨立出原始查詢中的 NOT IN 子查詢，使其更清晰。
---    這部分定義了哪些 TranCodeId = 17 的交易需要被排除。
--- 3. CombinedTransactions: 將原始查詢中的三個 UNION ALL 部分合併，並應用排除邏輯。
---    這裡正確處理了不同 TranCodeId 所對應的不同欄位 (AuthAward vs. AwardUsed)。
--- 4. mgmtBal: 執行最終的聚合計算。關鍵點是，SUM 的結果是在這裡才被取負值，
---    這與原始查詢的 SUM(ISNULL(-Val, 0)) 邏輯在效果上是等價的。
--- 5. Final Select: 最終的查詢結構與原始查詢保持一致。
+-- 這是修正後的版本，已將您指出的 `TranId = RelatedTranId` 條件加回。
+-- 這個條件對於篩選出 TranCodeId = 17 的「主交易」至關重要。
 
 WITH Player AS (
     -- 步驟 1: 根據分塊邏輯選取目標玩家
@@ -19,7 +12,6 @@ WITH Player AS (
 ),
 TransactionsToExclude AS (
     -- 步驟 2: 找出所有需要被排除的關聯交易ID (對應原始查詢的 NOT IN 子句)
-    -- 這些是 TranCodeId = 252 的交易中記錄的 RelatedTranId
     SELECT DISTINCT 
         a.RelatedTranId
     FROM dbo.tAwards a (NOLOCK)
@@ -29,19 +21,19 @@ TransactionsToExclude AS (
       AND a.ModifiedDtm BETWEEN @startPostDtm AND @endPostDtm
 ),
 CombinedTransactions AS (
-    -- 步驟 3: 合併所有相關交易，並應用排除邏輯
-    -- 這部分取代了原始查詢中的 `eachMComp` 子查詢
+    -- 步驟 3: 合併所有相關交易，並應用所有篩選邏輯
 
     -- 邏輯分支 1: 1st step Settle Transaction (IsOpenItem = 1)
     SELECT 
         a.PlayerId, 
-        a.AuthAward AS Val -- 使用 AuthAward
+        a.AuthAward AS Val
     FROM dbo.tAwards a (NOLOCK)
     WHERE a.PlayerId IN (SELECT PlayerId FROM Player)
       AND a.TranCodeId = 17
+      AND a.TranId = a.RelatedTranId -- <<<<<<< 在此處補上遺漏的關鍵條件
       AND a.IsOpenItem = 1 
       AND a.IsVoid = 0
-      AND NOT EXISTS ( -- 使用 NOT EXISTS 替代 NOT IN，通常性能更好
+      AND NOT EXISTS ( -- 使用 NOT EXISTS 替代 NOT IN
           SELECT 1 
           FROM TransactionsToExclude te 
           WHERE te.RelatedTranId = a.TranId
@@ -52,7 +44,7 @@ CombinedTransactions AS (
     -- 邏輯分支 2: 2nd step Settle Transaction
     SELECT 
         a.PlayerId, 
-        a.AwardUsed AS Val -- 使用 AwardUsed
+        a.AwardUsed AS Val -- 此處使用 AwardUsed
     FROM dbo.tAwards a (NOLOCK)
     WHERE a.PlayerId IN (SELECT PlayerId FROM Player)
       AND a.TranCodeId = 252 
@@ -64,10 +56,11 @@ CombinedTransactions AS (
     -- 邏輯分支 3: 1st step Settle Transaction (IsOpenItem = 0)
     SELECT 
         a.PlayerId, 
-        a.AuthAward AS Val -- 使用 AuthAward
+        a.AuthAward AS Val
     FROM dbo.tAwards a (NOLOCK)
     WHERE a.PlayerId IN (SELECT PlayerId FROM Player)
       AND a.TranCodeId = 17
+      AND a.TranId = a.RelatedTranId -- <<<<<<< 在此處也補上遺漏的關鍵條件
       AND a.IsOpenItem = 0 
       AND a.IsVoid = 0
       AND NOT EXISTS ( -- 再次應用排除邏輯
@@ -77,15 +70,15 @@ CombinedTransactions AS (
       )
 ),
 mgmtBal AS (
-    -- 步驟 4: 對合併後的交易進行分組聚合，並在此處應用負值邏輯
+    -- 步驟 4: 對合併後的交易進行分組聚合，並應用負值邏輯
     SELECT 
         p.Acct, 
-        ISNULL(SUM(ISNULL(ct.Val, 0)), 0) * -1 AS mgmtComp -- 先加總，再將總和變為負數
+        ISNULL(SUM(ISNULL(ct.Val, 0)), 0) * -1 AS mgmtComp
     FROM Player p
     INNER JOIN CombinedTransactions ct ON p.PlayerId = ct.PlayerId
     GROUP BY p.Acct
 )
--- 最終查詢: 結構與原始查詢相同，只是 JOIN 的對象變成了 CTE
+-- 最終查詢
 SELECT DISTINCT 
     p.Acct AS Acct, 
     @gamingDay AS GamingDt, 
