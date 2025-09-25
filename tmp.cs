@@ -1,17 +1,10 @@
--- 建議將所有操作包在一個交易中
-BEGIN;
+-- 1. 刪除舊的 BRIN 索引
+DROP INDEX earning.bucket_earned_transactions_hub_tran_idx;
 
--- 步驟 1: 將所有既有的 NULL 值更新為當前時間
--- 這是必要的步驟，否則下一步設定 NOT NULL 會失敗
-UPDATE your_table_name
-SET your_column_name = now()
-WHERE your_column_name IS NULL;
+-- 2. 建立新的 B-Tree 索引 (這是正確的選擇)
+--    同樣使用部分索引 (Partial Index) 來縮小索引體積，只索引未作廢的記錄
+CREATE INDEX bucket_earned_transactions_hub_tran_idx 
+ON earning.bucket_earned_transactions (hub_tran_id) 
+WHERE (NOT is_void);
 
--- 步驟 2: 修改欄位屬性，設定 NOT NULL 和 DEFAULT 值
--- 您可以將多個 ALTER COLUMN 操作合併在一個 ALTER TABLE 指令中
-ALTER TABLE your_table_name
-    ALTER COLUMN your_column_name SET NOT NULL,
-    ALTER COLUMN your_column_name SET DEFAULT now();
 
--- 確認無誤後，提交交易
-COMMIT;
