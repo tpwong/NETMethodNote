@@ -1,271 +1,303 @@
-好的，选择 `jsonb` 并且在冲突时追加对象是一个非常明智的决定，完全符合这个数据模型的优势。您提到的最终结果是 `object array`，这正是我们之前讨论的 `jsonb` 数组。
+*Thinking...*
 
-下面我将为您提供一个**最终版本**的、可以直接在项目中使用的完整代码实现。这个实现将使用 **Dapper**，并精确地执行您所描述的逻辑：**插入新记录，如果发生冲突，则将新的对象（或对象数组）追加到已有的 `jsonb` 数组后面。**
+> **Understanding the Task at Hand**
+> 
+> I'm now actively dissecting the user's request. It appears the core need is to refactor a section of their `appsettings.json`. The initial input seems to include an image of the JSON file, which is a helpful starting point. Further clarification on the specific refactoring goals would be valuable.
+> 
+> 
+> **Mapping User Requirements**
+> 
+> I'm now focused on the user's desired output. It seems they need to transform a flat structure into nested objects within `appsettings.json`. The image provides a clear example to guide me. I'm creating a mental model of the structure, focusing on how to represent "hub casino code" and "locn code" as properties within a structured object. I am starting to see a potential model.
+> 
+> 
+> **Defining the JSON Structure**
+> 
+> I've solidified my understanding of the transformation needed for the `appsettings.json` file. The primary focus is creating a structured object to replace the flat key-value pairs within the "PropertyOptions" section. My thoughts are now centered around formulating the precise JSON structure that aligns with the user's requirements for "opera casino code", "hub casino code," and "locn code". I'm considering the optimal naming conventions and data types to ensure seamless integration with the C# classes.
+> 
+> 
+> **Structuring the Response**
+> 
+> I'm structuring the response to provide a clear, step-by-step solution. I plan to start by confirming the user's request, providing a "before" and "after" representation of the `appsettings.json` file. Then, I will move on to define the necessary C# model classes and address the core question of how to structure them for seamless configuration binding. The focus is on practical, runnable code with clear explanations for the expert user.
+> 
+> 
+> **Planning the Code Snippets**
+> 
+> I'm now constructing the core components of the response: the modified `appsettings.json` examples and the corresponding C# classes. My focus is on providing clear, runnable code. I am beginning to sketch out the `CasinoMapping` class, including attributes to map the JSON properties to C# properties, and the root configuration class, `MyApplicationSettings`, which will wrap the dictionary of mappings. I will ensure each segment of the code has descriptive comments to improve readability.
+> 
+> 
+> **Planning the Solution Structure**
+> 
+> I'm now translating the user's objective into a detailed, runnable response, focusing on clear, concise instructions, and code examples. I plan to use distinct steps, including sample `appsettings.json` changes and C# class definitions, while using Traditional Chinese, as requested. I will emphasize best practices like `JsonProperty` attributes and the use of `IOptions<>` for dependency injection.
+> 
+> 
+> **Formulating the Solution**
+> 
+> I'm now breaking down the response into manageable sections, creating a well-organized guide. It will start by showing the modified JSON, alongside detailed C# models, all wrapped in clear Traditional Chinese. I'm targeting the most practical and complete answer for the user, aligning with the information I have already. The steps will cover the changes to `appsettings.json`, C# classes, configuration binding, and service usage.
+> 
+> 
+好的，完全理解您的需求。您希望將 `appsettings.json` 中 `PropertyOptions` 的設定從一個扁平的、使用逗號分隔字串的結構，重構為一個更具結構化、值為物件 (object) 的形式，並想知道在 C# 中如何實現這個配置的最佳實踐。
+
+目前的結構：
+```json
+"GHM": "GHM, GHMGOpera"
+```
+
+您期望的結構：
+```json
+"GHM": {
+  "HubCasinoCode": "GHM",
+  "LocnCode": "GHMGOpera"
+}
+```
+
+這是一個非常好的重構方向，它能讓您的設定檔更清晰、更易於維護，並且在 C# 中可以被強型別 (strongly-typed) 物件接收，從而減少錯誤並提升開發體驗。
+
+以下是我的建議，包含完整的步驟說明與程式碼範例。
 
 ---
 
-### 最终实现方案 (Dapper + PostgreSQL)
+### 總結建議
 
-这个方案包含了所有必要的元素：数据库准备、C# 模型、以及一个健壮的、可重用的数据访问方法。
+我們將會執行以下四個步驟：
 
-#### 步骤 1: 数据库表结构确认
+1.  **修改 `appsettings.json`**：將設定檔更新為您期望的巢狀物件結構。
+2.  **建立對應的 C# 模型 (Models)**：建立 C# 類別來對應新的 JSON 結構，以便進行強型別綁定。
+3.  **在 `Program.cs` 中綁定設定**：使用 .NET 的依賴注入 (Dependency Injection) 和設定模型 (Options Pattern) 來將 JSON 設定值綁定到 C# 物件上。
+4.  **在服務中使用設定**：示範如何在您的服務（例如圖片中的 `CompRedeemService.cs`）中注入並使用這些強型別的設定。
 
-我们确保数据库表和唯一索引已经就绪。
+---
 
-```sql
--- 1. 创建表（如果还不存在）
-CREATE TABLE IF NOT EXISTS accounts (
-    id SERIAL PRIMARY KEY,
-    account_name TEXT NOT NULL,
-    transaction_history JSONB
-);
+### 步驟 1：修改 `appsettings.json`
 
--- 2. 创建唯一索引以支持 ON CONFLICT（如果还不存在）
---    使用 CREATE UNIQUE INDEX ... ON CONFLICT DO NOTHING 来避免在索引已存在时报错
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM   pg_class c
-        JOIN   pg_namespace n ON n.oid = c.relnamespace
-        WHERE  c.relname = 'idx_accounts_unique_account_name'
-        AND    n.nspname = 'public' -- 或者您的 schema 名称
-    ) THEN
-        CREATE UNIQUE INDEX idx_accounts_unique_account_name ON accounts(account_name);
-    END IF;
-END;
-$$;
+首先，我們來更新您的 `appsettings.json` 檔案。對於 `PropertyOptions` 區塊，我們將每個屬性的值從字串改為一個物件。對於那些原本只有一個值的屬性（如 `"SWH": "SW"`），我們可以讓 `LocnCode` 為 `null` 或直接省略該欄位。
+
+```json
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*",
+  "OperaPrize": {
+    "RedeemPrizeCode": "Opera",
+    "AuthAward": "1.0",
+    "XEmp": "OPERA"
+  },
+  "PropertyOptions": {
+    "GHM": {
+      "HubCasinoCode": "GHM",
+      "LocnCode": "GHMGOpera"
+    },
+    "SWH": {
+      "HubCasinoCode": "SW",
+      "LocnCode": null
+    },
+    "GWH": {
+      "HubCasinoCode": "BW"
+    },
+    "BTCNMC": {
+      "HubCasinoCode": "BT"
+    },
+    "MFMJW": {
+      "HubCasinoCode": "JW"
+    },
+    "MFMMR": {
+      "HubCasinoCode": "RC"
+    },
+    "HOM": {
+      "HubCasinoCode": "OK"
+    },
+    "RFM": {
+      "HubCasinoCode": "RA"
+    },
+    "MACAZ": {
+      "HubCasinoCode": "AN"
+    },
+    "CPM": {
+      "HubCasinoCode": "CA"
+    }
+  },
+  "ReverseProxy": {
+    "Routes": {
+      "route1": {
+        "ClusterId": "cluster1",
+        "Match": {
+          "Path": "{**catch-all}"
+        }
+      }
+    },
+    "Clusters": {
+      "cluster1": {
+        "Destinations": {
+          "destination1": {
+            "Address": "https://example.com/"
+          }
+        }
+      }
+    }
+  }
+}
 ```
 
-**说明**:
-*   `CREATE TABLE IF NOT EXISTS` 确保脚本可重复执行。
-*   `DO $$ ... $$` 块允许我们使用程序逻辑来检查索引是否存在，避免了重复创建索引时抛出错误，增强了脚本的健壮性。
+**說明：**
+*   `PropertyOptions` 現在是一個物件，其屬性（如 `GHM`, `SWH`）的值也是物件。
+*   每個內部物件都包含 `HubCasinoCode` 和可選的 `LocnCode`。
+*   在 `SWH` 的例子中，我將 `LocnCode` 設為 `null`。
+*   在 `GWH` 的例子中，我直接省略了 `LocnCode` 欄位。這兩種方式 C# 的設定綁定器都能妥善處理。
 
-#### 步骤 2: C# 模型定义
+---
 
-这些模型保持不变，它们完美地描述了您的数据结构。
+### 步驟 2：建立對應的 C# 模型 (Models)
+
+接下來，我們需要建立 C# 類別來映射 `appsettings.json` 中的 `PropertyOptions` 結構。由於 `PropertyOptions` 的鍵 (key) 是動態的（`GHM`, `SWH` 等），最適合的 C# 型別是 `Dictionary<string, T>`。
+
+建議您在專案中建立一個 `Models` 或 `Configuration` 資料夾來存放這些設定類別。
+
+**CasinoMapping.cs**
+這個類別代表每個 casino code 對應的詳細資訊物件。
 
 ```csharp
 using System.Text.Json.Serialization;
 
-/// <summary>
-/// 代表单条交易记录的对象。
-/// </summary>
-public class TransactionRecord
-{
-    [JsonPropertyName("amount")]
-    public decimal Amount { get; set; }
-
-    [JsonPropertyName("createTime")]
-    public DateTime CreateTime { get; set; }
-}
+namespace YourProjectName.Configuration; // 請替換成您的專案命名空間
 
 /// <summary>
-/// 代表数据库中 'accounts' 表的一行数据。
+/// 代表單一屬性代碼的映射設定。
 /// </summary>
-public class Account
+public class CasinoMapping
 {
-    public int Id { get; set; }
-    public string AccountName { get; set; } = string.Empty;
-    public List<TransactionRecord> TransactionHistory { get; set; } = new List<TransactionRecord>();
+    /// <summary>
+    /// 代表 Hub 使用的 Casino 代碼。
+    /// </summary>
+    [JsonPropertyName("HubCasinoCode")] // 這個屬性確保能正確對應 JSON 中的 "HubCasinoCode"
+    public required string HubCasinoCode { get; set; }
+
+    /// <summary>
+    /// 代表 Location (Opera) 的特定代碼，可能為 null。
+    /// </summary>
+    [JsonPropertyName("LocnCode")]
+    public string? LocnCode { get; set; }
 }
 ```
 
-#### 步骤 3: 核心数据访问服务 (Dapper)
+**說明：**
+*   我們定義了一個 `CasinoMapping` 類別。
+*   `HubCasinoCode` 使用 `required` 關鍵字 (C# 11+)，表示這個值在 JSON 中必須存在。如果您的 .NET 版本較低，可以移除 `required` 並確保它有非 null 的預設值或在建構函式中初始化。
+*   `LocnCode` 被定義為可為 null 的字串 (`string?`)，這完美地對應了 JSON 中可能不存在或值為 `null` 的情況。
+*   `[JsonPropertyName(...)]` 屬性是個好習慣，它可以確保即使您的 C# 屬性名稱與 JSON 鍵的大小寫或命名風格不同，也能正確綁定。
 
-这是实现您需求的核心代码。我们将创建一个 `AccountRepository` 类，它封装了所有的数据库交互逻辑。
+---
+
+### 步驟 3：在 `Program.cs` 中綁定設定
+
+現在，我們需要在應用程式啟動時，告訴 .NET 如何讀取 `PropertyOptions` 區塊並將其轉換成我們的 C# 物件。這通常在 `Program.cs` (適用於 .NET 6+ 的 Minimal APIs) 或 `Startup.cs` (適用於舊版) 中完成。
+
+**Program.cs**
 
 ```csharp
-using Dapper;
-using Npgsql;
-using System.Text.Json;
+using YourProjectName.Configuration; // 引入您的模型命名空間
 
-public class AccountRepository
-{
-    private readonly string _connectionString;
+var builder = WebApplication.CreateBuilder(args);
 
-    /// <summary>
-    /// 初始化仓库，并传入数据库连接字符串。
-    /// </summary>
-    /// <param name="connectionString">PostgreSQL 连接字符串。</param>
-    public AccountRepository(string connectionString)
-    {
-        _connectionString = connectionString;
-    }
+// ... 其他服務註冊，例如 AddControllers
 
-    /// <summary>
-    /// 插入一个新账户；如果账户名已存在，则将新的交易记录追加到现有的交易历史中。
-    /// 这个方法可以处理单个对象或对象数组的追加。
-    /// </summary>
-    /// <param name="accountName">要操作的账户名称。</param>
-    /// <param name="newTransactions">要追加的单个或多个交易记录。</param>
-    /// <returns>操作完成后账户的 ID。</returns>
-    public async Task<int> AddOrAppendTransactionsAsync(string accountName, List<TransactionRecord> newTransactions)
-    {
-        // 防御性编程：如果传入的列表为空或 null，则无需执行数据库操作。
-        if (newTransactions == null || newTransactions.Count == 0)
-        {
-            // 如果需要，可以先查询账户是否存在并返回其 ID，或者直接返回-1表示未操作。
-            // 这里我们选择直接返回，因为没有数据要追加。
-            // 为了获得ID，可以添加一个简单的查询。
-            await using var connCheck = new NpgsqlConnection(_connectionString);
-            var existingId = await connCheck.ExecuteScalarAsync<int?>("SELECT id FROM accounts WHERE account_name = @accountName", new { accountName });
-            return existingId ?? -1; // 如果账户存在返回ID，否则返回-1
-        }
+// --- 開始設定綁定 ---
 
-        // 1. 将要追加的 C# 对象列表序列化为 JSON 字符串。
-        string newTransactionsJson = JsonSerializer.Serialize(newTransactions);
+// 將 appsettings.json 中的 "PropertyOptions" 區塊
+// 綁定到 Dictionary<string, CasinoMapping> 型別上。
+// 這樣我們就可以在任何需要的地方透過 IOptions<T> 來注入它。
+builder.Services.Configure<Dictionary<string, CasinoMapping>>(
+    builder.Configuration.GetSection("PropertyOptions")
+);
 
-        // 2. 核心 SQL 语句，使用 ON CONFLICT DO UPDATE
-        const string sql = @"
-            INSERT INTO accounts (account_name, transaction_history)
-            VALUES (@AccountName, @NewTransactionsJson::jsonb)
-            ON CONFLICT (account_name)
-            DO UPDATE SET
-                transaction_history = COALESCE(accounts.transaction_history, '[]'::jsonb) || excluded.transaction_history
-            RETURNING id;
-        ";
+// --- 結束設定綁定 ---
 
-        // 3. 使用 Dapper 执行并返回 ID
-        await using var connection = new NpgsqlConnection(_connectionString);
-        var accountId = await connection.ExecuteScalarAsync<int>(sql, new
-        {
-            AccountName = accountName,
-            NewTransactionsJson = newTransactionsJson
-        });
 
-        return accountId;
-    }
-    
-    /// <summary>
-    /// 根据账户名获取完整的账户信息，包括所有交易历史。
-    /// </summary>
-    /// <param name="accountName">要查询的账户名称。</param>
-    /// <returns>包含完整交易历史的 Account 对象，如果找不到则返回 null。</returns>
-    public async Task<Account?> GetAccountByNameAsync(string accountName)
-    {
-        const string sql = "SELECT id, account_name, transaction_history FROM accounts WHERE account_name = @accountName";
-        
-        await using var connection = new NpgsqlConnection(_connectionString);
-        
-        // 使用匿名类型来接收 Dapper 的动态结果
-        var rawResult = await connection.QuerySingleOrDefaultAsync(sql, new { accountName });
+var app = builder.Build();
 
-        if (rawResult == null)
-        {
-            return null;
-        }
+// ... 中介軟體設定
 
-        // Dapper 默认将 jsonb 列读取为字符串。我们需要手动反序列化。
-        // ?? "[]" 确保即使数据库中的值为 NULL，我们也能得到一个空的列表而不是 null 引用。
-        string historyJson = rawResult.transaction_history ?? "[]";
-        var transactionHistory = JsonSerializer.Deserialize<List<TransactionRecord>>(historyJson) ?? new List<TransactionRecord>();
-        
-        return new Account
-        {
-            Id = rawResult.id,
-            AccountName = rawResult.account_name,
-            TransactionHistory = transactionHistory
-        };
-    }
-}
+app.Run();
 ```
 
-#### 步骤 4: 使用示例
+**說明：**
+*   `builder.Configuration.GetSection("PropertyOptions")` 會讀取 `appsettings.json` 中的 `PropertyOptions` 區塊。
+*   `builder.Services.Configure<T>()` 會將這個設定區塊註冊到依賴注入容器中，並設定它應該被綁定到 `Dictionary<string, CasinoMapping>` 這個型別。
 
-下面是如何在您的应用程序中使用这个 `AccountRepository`。
+---
+
+### 步驟 4：在服務中使用設定
+
+最後，您可以在任何透過依賴注入建立的服務（例如 Controller 或您自己的服務 `CompRedeemService`）中，輕鬆地使用這些設定。
+
+**CompRedeemService.cs**
 
 ```csharp
-public class Program
+using Microsoft.Extensions.Options;
+using YourProjectName.Configuration; // 引入您的模型命名空間
+
+public class CompRedeemService
 {
-    public static async Task Main(string[] args)
+    private readonly Dictionary<string, CasinoMapping> _propertyOptions;
+
+    // 透過建構函式注入 IOptions<T>
+    public CompRedeemService(IOptions<Dictionary<string, CasinoMapping>> propertyOptions)
     {
-        // 替换为您的真实连接字符串
-        const string connectionString = "Host=localhost;Username=your_user;Password=your_password;Database=your_db";
-
-        var repository = new AccountRepository(connectionString);
-        var accountName = "David's Investment";
-
-        Console.WriteLine($"--- 场景 1: 首次为 '{accountName}' 添加一笔交易 ---");
-
-        // 准备第一笔交易 (在一个 List 中)
-        var firstTransaction = new List<TransactionRecord>
-        {
-            new TransactionRecord { Amount = 5000.00m, CreateTime = DateTime.UtcNow.AddDays(-3) }
-        };
-
-        // 调用方法，这会执行 INSERT
-        int accountId = await repository.AddOrAppendTransactionsAsync(accountName, firstTransaction);
-        Console.WriteLine($"操作完成。账户 ID: {accountId}");
-
-        // 验证结果
-        var accountAfterFirstInsert = await repository.GetAccountByNameAsync(accountName);
-        PrintAccountDetails(accountAfterFirstInsert);
-
-        Console.WriteLine("\n" + new string('-', 50) + "\n");
-
-        Console.WriteLine($"--- 场景 2: 为 '{accountName}' 追加两笔新的交易 ---");
-
-        // 准备要追加的新交易
-        var newTransactions = new List<TransactionRecord>
-        {
-            new TransactionRecord { Amount = -250.50m, CreateTime = DateTime.UtcNow.AddDays(-2) },
-            new TransactionRecord { Amount = 120.00m, CreateTime = DateTime.UtcNow.AddDays(-1) }
-        };
-
-        // 再次调用相同的方法，这次会触发 ON CONFLICT 并执行 UPDATE
-        accountId = await repository.AddOrAppendTransactionsAsync(accountName, newTransactions);
-        Console.WriteLine($"操作完成。账户 ID: {accountId} (ID 应该保持不变)");
-
-        // 验证最终结果
-        var accountAfterAppend = await repository.GetAccountByNameAsync(accountName);
-        PrintAccountDetails(accountAfterAppend);
+        // .Value 屬性會回傳已經綁定好的 Dictionary 物件
+        _propertyOptions = propertyOptions.Value;
     }
 
-    private static void PrintAccountDetails(Account? account)
+    /// <summary>
+    /// 根據傳入的 Opera Casino Code 取得對應的 Hub Casino Code。
+    /// </summary>
+    /// <param name="operaCasinoCode">例如 "GHM" 或 "SWH"</param>
+    /// <returns>對應的 Hub Casino Code，如果找不到則回傳 null。</returns>
+    public string? GetHubCasinoCode(string operaCasinoCode)
     {
-        if (account == null)
+        // 使用 TryGetValue 來安全地取得值，避免 KeyNotFoundException
+        if (_propertyOptions.TryGetValue(operaCasinoCode, out var mapping))
         {
-            Console.WriteLine("未找到账户。");
-            return;
+            return mapping.HubCasinoCode;
         }
 
-        Console.WriteLine($"成功获取账户: '{account.AccountName}' (ID: {account.Id})");
-        Console.WriteLine($"共有 {account.TransactionHistory.Count} 条交易记录:");
-        foreach (var tx in account.TransactionHistory)
+        // 如果在設定中找不到對應的 key，可以根據業務邏輯回傳 null 或拋出例外
+        return null;
+    }
+
+    /// <summary>
+    /// 示範如何取得完整的映射物件
+    /// </summary>
+    public void ProcessCasino(string operaCasinoCode)
+    {
+        if (_propertyOptions.TryGetValue(operaCasinoCode, out var mapping))
         {
-            Console.WriteLine($"  - 金额: {tx.Amount, 10:C}, 时间: {tx.CreateTime:yyyy-MM-dd HH:mm:ss 'UTC'}");
+            Console.WriteLine($"Processing for {operaCasinoCode}:");
+            Console.WriteLine($"  Hub Code: {mapping.HubCasinoCode}");
+            Console.WriteLine($"  Location Code: {mapping.LocnCode ?? "N/A"}"); // 使用 ?? 運算子處理 null
+        }
+        else
+        {
+            Console.WriteLine($"No configuration found for {operaCasinoCode}.");
         }
     }
 }
 ```
 
-#### 预期输出
+**說明：**
+*   我們在建構函式中注入 `IOptions<Dictionary<string, CasinoMapping>>`。這是 .NET 中處理設定的標準模式。
+*   透過 `propertyOptions.Value`，我們可以取得已完全填充資料的 `Dictionary` 物件。
+*   在方法中，您現在可以像操作任何標準字典一樣操作 `_propertyOptions`，並且可以存取 `CasinoMapping` 物件的強型別屬性 `HubCasinoCode` 和 `LocnCode`。
+*   使用 `TryGetValue` 是比直接使用 `_propertyOptions[key]` 更安全的方式，因為它不會在找不到鍵時拋出例外。
 
-```
---- 场景 1: 首次为 'David's Investment' 添加一笔交易 ---
-操作完成。账户 ID: 1
-成功获取账户: 'David's Investment' (ID: 1)
-共有 1 条交易记录:
-  - 金额:    $5,000.00, 时间: 2023-10-24 14:30:00 UTC
+### 結論
 
---------------------------------------------------
+透過以上四個步驟，您就成功地將設定重構為一個更健壯、可維護且易於使用的結構。這種方法有以下好處：
 
---- 场景 2: 为 'David's Investment' 追加两笔新的交易 ---
-操作完成。账户 ID: 1 (ID 应该保持不变)
-成功获取账户: 'David's Investment' (ID: 1)
-共有 3 条交易记录:
-  - 金额:    $5,000.00, 时间: 2023-10-24 14:30:00 UTC
-  - 金额:     -$250.50, 时间: 2023-10-25 14:30:00 UTC
-  - 金额:      $120.00, 时间: 2023-10-26 14:30:00 UTC
-```
+*   **強型別安全**：編譯器會檢查您的屬性名稱（例如 `mapping.HubCasinoCode`），減少因打錯字而導致的執行期錯誤。
+*   **可讀性與意圖清晰**：`appsettings.json` 的結構更清晰，`CasinoMapping` 類別也明確地表達了資料的意圖。
+*   **智慧提示 (IntelliSense)**：在 Visual Studio 或 VS Code 中撰寫程式碼時，您會得到完整的屬性自動完成提示。
+*   **易於擴展**：如果未來需要為每個 casino 新增更多設定（例如 `IsEnabled` 旗標），您只需在 `CasinoMapping` 類別和 `appsettings.json` 中新增欄位即可，無需修改解析邏輯。
 
-### 总结
-
-这个最终方案为您提供了一个健壮、高效且易于维护的方式来处理您的需求。
-
-*   **封装良好**: `AccountRepository` 将所有数据访问逻辑封装起来，您的业务代码只需与这个仓库交互，无需关心 SQL 细节。
-*   **SQL 强大**: 我们充分利用了 PostgreSQL 的 `ON CONFLICT` 和 `jsonb` 操作符，将复杂的逻辑放在数据库端高效执行。
-*   **C# 简洁**: Dapper 和 `System.Text.Json` 的组合让 C# 端的代码保持简洁明了。
-
-这套代码可以直接集成到您的项目中，作为处理 `jsonb` 数组追加操作的坚实基础。
+希望這個詳細的建議對您有幫助！
