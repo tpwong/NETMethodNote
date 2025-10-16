@@ -1,303 +1,312 @@
 *Thinking...*
 
-> **Understanding the Task at Hand**
+> **Exploring the Core Task**
 > 
-> I'm now actively dissecting the user's request. It appears the core need is to refactor a section of their `appsettings.json`. The initial input seems to include an image of the JSON file, which is a helpful starting point. Further clarification on the specific refactoring goals would be valuable.
-> 
-> 
-> **Mapping User Requirements**
-> 
-> I'm now focused on the user's desired output. It seems they need to transform a flat structure into nested objects within `appsettings.json`. The image provides a clear example to guide me. I'm creating a mental model of the structure, focusing on how to represent "hub casino code" and "locn code" as properties within a structured object. I am starting to see a potential model.
+> I'm currently focused on the user's need to transform an `INSERT ... ON CONFLICT DO UPDATE` statement. I see the main goal is to migrate this to an efficient bulk copy implementation using `Npgsql` with Dapper. I'm starting to think about the best approach to translate the conflict handling into the bulk copy context.
 > 
 > 
-> **Defining the JSON Structure**
+> **Decomposing the Conflict Strategy**
 > 
-> I've solidified my understanding of the transformation needed for the `appsettings.json` file. The primary focus is creating a structured object to replace the flat key-value pairs within the "PropertyOptions" section. My thoughts are now centered around formulating the precise JSON structure that aligns with the user's requirements for "opera casino code", "hub casino code," and "locn code". I'm considering the optimal naming conventions and data types to ensure seamless integration with the C# classes.
-> 
-> 
-> **Structuring the Response**
-> 
-> I'm structuring the response to provide a clear, step-by-step solution. I plan to start by confirming the user's request, providing a "before" and "after" representation of the `appsettings.json` file. Then, I will move on to define the necessary C# model classes and address the core question of how to structure them for seamless configuration binding. The focus is on practical, runnable code with clear explanations for the expert user.
+> I'm now dissecting the `ON CONFLICT DO UPDATE` part. The challenge is mapping this upsert logic into a bulk copy workflow. Thinking about how to determine which records will cause a conflict. Then, I'll analyze how to efficiently represent this information in the bulk copy process to ensure correct updates.
 > 
 > 
-> **Planning the Code Snippets**
+> **Formulating a Bulk Strategy**
 > 
-> I'm now constructing the core components of the response: the modified `appsettings.json` examples and the corresponding C# classes. My focus is on providing clear, runnable code. I am beginning to sketch out the `CasinoMapping` class, including attributes to map the JSON properties to C# properties, and the root configuration class, `MyApplicationSettings`, which will wrap the dictionary of mappings. I will ensure each segment of the code has descriptive comments to improve readability.
-> 
-> 
-> **Planning the Solution Structure**
-> 
-> I'm now translating the user's objective into a detailed, runnable response, focusing on clear, concise instructions, and code examples. I plan to use distinct steps, including sample `appsettings.json` changes and C# class definitions, while using Traditional Chinese, as requested. I will emphasize best practices like `JsonProperty` attributes and the use of `IOptions<>` for dependency injection.
+> I'm now strategizing around the `ON CONFLICT` aspect. I'll need to integrate `NpgsqlBinaryImporter` for fast inserts, while also handling potential conflicts. Thinking about creating a staging table or using a temporary table to buffer the data first, then merging. This allows for conflict resolution.
 > 
 > 
-> **Formulating the Solution**
+> **Crafting a Combined Approach**
 > 
-> I'm now breaking down the response into manageable sections, creating a well-organized guide. It will start by showing the modified JSON, alongside detailed C# models, all wrapped in clear Traditional Chinese. I'm targeting the most practical and complete answer for the user, aligning with the information I have already. The steps will cover the changes to `appsettings.json`, C# classes, configuration binding, and service usage.
+> I'm now consolidating the staging table strategy. I'll insert into a temp table using the `NpgsqlBinaryImporter`. Then, I'll write an `UPDATE` statement that uses `MERGE` or `INSERT ... ON CONFLICT DO UPDATE` from the temporary to the target table to handle the upsert logic. This approach balances performance and conflict resolution.
 > 
 > 
-好的，完全理解您的需求。您希望將 `appsettings.json` 中 `PropertyOptions` 的設定從一個扁平的、使用逗號分隔字串的結構，重構為一個更具結構化、值為物件 (object) 的形式，並想知道在 C# 中如何實現這個配置的最佳實踐。
+> **Refining Staging and Merging**
+> 
+> I'm now honing in on the staging table's role in upsert logic. My plan involves using `NpgsqlBinaryImporter` to efficiently populate a temp table with all incoming data. Then, a single, carefully crafted SQL `MERGE` statement will perform the upserts into the target table, ensuring all conflict resolution happens within the database. I'm focusing on the performance and elegance of the `MERGE`.
+> 
+> 
+> **Fine-Tuning Type Mapping**
+> 
+> I'm now focusing on precise type mapping within the `NpgsqlBinaryImporter`. I'll carefully map C# properties to the corresponding `NpgsqlDbType` values. For date/time, I'll use `TimestampTz`, for integers, `Integer`, and for monetary values like `point` and `dollar`, I'll lean toward `Numeric` for the most accurate representation. I will cover edge cases for potential `NULL` values too.
+> 
+> 
+> **Mapping and Type Selection**
+> 
+> I'm now focused on the `NpgsqlDbType` mapping. Since this is a bulk copy, proper type selection is critical for performance and data integrity. Considering `TimestampTz` for timestamps with timezone, `Integer` for integers, and `Numeric` for `point` and `dollar` monetary types to ensure precision. I'll also cover null value handling to prevent potential errors.
+> 
+> 
+> **Evaluating the Upsert Strategy**
+> 
+> I'm now pondering the best `ON CONFLICT` strategy. Since I'm leaning towards the temp table approach, the key is the final `MERGE` or the `INSERT ... ON CONFLICT DO UPDATE` statement. I'll prioritize the latter since it's more PostgreSQL-idiomatic. I'll analyze how to best translate the original upsert logic into this statement.
+> 
+> 
+> **Outlining the Implementation**
+> 
+> I'm now designing the C# method, keeping the existing Dapper code signature. I'm now thinking about the database connection, temp table creation, `NpgsqlBinaryImporter` implementation, the upsert statement, and the transaction management. I'm focused on ensuring everything integrates seamlessly and efficiently within a transaction.
+> 
+> 
+好的，這是一個非常經典的效能優化場景。您目前使用 Dapper 的方式，雖然語法簡潔，但它實際上是在迴圈中逐一執行 `INSERT` 命令。當 `ratings` 陣列很大時，這會導致大量的資料庫來回通訊，效能較差。
 
-目前的結構：
-```json
-"GHM": "GHM, GHMGOpera"
-```
+將其改為 PostgreSQL 的 Bulk Copy (批量複製) 是正確的解決方案。這利用了 PostgreSQL 底層高效的 `COPY` 命令，可以一次性將大量資料從客戶端傳輸到資料庫，速度快非常多。
 
-您期望的結構：
-```json
-"GHM": {
-  "HubCasinoCode": "GHM",
-  "LocnCode": "GHMGOpera"
-}
-```
+不過，這裡有一個關鍵點：**原生的 Bulk Copy (`COPY` 命令) 只支援 `INSERT`，不支援 `ON CONFLICT DO UPDATE` (Upsert) 邏輯。**
 
-這是一個非常好的重構方向，它能讓您的設定檔更清晰、更易於維護，並且在 C# 中可以被強型別 (strongly-typed) 物件接收，從而減少錯誤並提升開發體驗。
+因此，最標準、最高效的作法是「**臨時表 + Bulk Copy + Upsert**」策略。步驟如下：
 
-以下是我的建議，包含完整的步驟說明與程式碼範例。
+1.  **建立一個臨時表 (Temporary Table)**，其結構與您的目標表 `earning_qualified_ratings` 完全相同。
+2.  **使用 Bulk Copy** 將 C# 中的所有 `ratings` 資料高效地寫入這個臨時表。
+3.  **執行一條 SQL 命令**，將臨時表的資料合併 (Upsert) 到最終的目標表中。
+4.  事務結束後，臨時表會自動被清除。
 
----
+下面我將為您提供完整的 C# 程式碼，並詳細解釋每一步。
 
-### 總結建議
+### 分析與準備
 
-我們將會執行以下四個步驟：
-
-1.  **修改 `appsettings.json`**：將設定檔更新為您期望的巢狀物件結構。
-2.  **建立對應的 C# 模型 (Models)**：建立 C# 類別來對應新的 JSON 結構，以便進行強型別綁定。
-3.  **在 `Program.cs` 中綁定設定**：使用 .NET 的依賴注入 (Dependency Injection) 和設定模型 (Options Pattern) 來將 JSON 設定值綁定到 C# 物件上。
-4.  **在服務中使用設定**：示範如何在您的服務（例如圖片中的 `CompRedeemService.cs`）中注入並使用這些強型別的設定。
-
----
-
-### 步驟 1：修改 `appsettings.json`
-
-首先，我們來更新您的 `appsettings.json` 檔案。對於 `PropertyOptions` 區塊，我們將每個屬性的值從字串改為一個物件。對於那些原本只有一個值的屬性（如 `"SWH": "SW"`），我們可以讓 `LocnCode` 為 `null` 或直接省略該欄位。
-
-```json
-{
-  "Logging": {
-    "LogLevel": {
-      "Default": "Information",
-      "Microsoft.AspNetCore": "Warning"
-    }
-  },
-  "AllowedHosts": "*",
-  "OperaPrize": {
-    "RedeemPrizeCode": "Opera",
-    "AuthAward": "1.0",
-    "XEmp": "OPERA"
-  },
-  "PropertyOptions": {
-    "GHM": {
-      "HubCasinoCode": "GHM",
-      "LocnCode": "GHMGOpera"
-    },
-    "SWH": {
-      "HubCasinoCode": "SW",
-      "LocnCode": null
-    },
-    "GWH": {
-      "HubCasinoCode": "BW"
-    },
-    "BTCNMC": {
-      "HubCasinoCode": "BT"
-    },
-    "MFMJW": {
-      "HubCasinoCode": "JW"
-    },
-    "MFMMR": {
-      "HubCasinoCode": "RC"
-    },
-    "HOM": {
-      "HubCasinoCode": "OK"
-    },
-    "RFM": {
-      "HubCasinoCode": "RA"
-    },
-    "MACAZ": {
-      "HubCasinoCode": "AN"
-    },
-    "CPM": {
-      "HubCasinoCode": "CA"
-    }
-  },
-  "ReverseProxy": {
-    "Routes": {
-      "route1": {
-        "ClusterId": "cluster1",
-        "Match": {
-          "Path": "{**catch-all}"
-        }
-      }
-    },
-    "Clusters": {
-      "cluster1": {
-        "Destinations": {
-          "destination1": {
-            "Address": "https://example.com/"
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-**說明：**
-*   `PropertyOptions` 現在是一個物件，其屬性（如 `GHM`, `SWH`）的值也是物件。
-*   每個內部物件都包含 `HubCasinoCode` 和可選的 `LocnCode`。
-*   在 `SWH` 的例子中，我將 `LocnCode` 設為 `null`。
-*   在 `GWH` 的例子中，我直接省略了 `LocnCode` 欄位。這兩種方式 C# 的設定綁定器都能妥善處理。
-
----
-
-### 步驟 2：建立對應的 C# 模型 (Models)
-
-接下來，我們需要建立 C# 類別來映射 `appsettings.json` 中的 `PropertyOptions` 結構。由於 `PropertyOptions` 的鍵 (key) 是動態的（`GHM`, `SWH` 等），最適合的 C# 型別是 `Dictionary<string, T>`。
-
-建議您在專案中建立一個 `Models` 或 `Configuration` 資料夾來存放這些設定類別。
-
-**CasinoMapping.cs**
-這個類別代表每個 casino code 對應的詳細資訊物件。
+從您的 SQL 來看，您的 `QualifyingRating` 物件大概有以下屬性。我會根據欄位名稱推斷其資料類型，請根據您的實際情況調整。
 
 ```csharp
-using System.Text.Json.Serialization;
-
-namespace YourProjectName.Configuration; // 請替換成您的專案命名空間
-
-/// <summary>
-/// 代表單一屬性代碼的映射設定。
-/// </summary>
-public class CasinoMapping
+// 假設您的 QualifyingRating 類別長這樣
+// 請根據您的實際定義進行調整
+public class QualifyingRating
 {
-    /// <summary>
-    /// 代表 Hub 使用的 Casino 代碼。
-    /// </summary>
-    [JsonPropertyName("HubCasinoCode")] // 這個屬性確保能正確對應 JSON 中的 "HubCasinoCode"
-    public required string HubCasinoCode { get; set; }
-
-    /// <summary>
-    /// 代表 Location (Opera) 的特定代碼，可能為 null。
-    /// </summary>
-    [JsonPropertyName("LocnCode")]
-    public string? LocnCode { get; set; }
+    public string RatingType { get; set; }
+    public long TranId { get; set; }
+    public string Acct { get; set; }
+    public string PlayerId { get; set; }
+    public long? VoidTranId { get; set; } // 可為 null
+    public DateTime GamingDt { get; set; }
+    public DateTime PostDtm { get; set; }
+    public DateTime ModifiedDtm { get; set; }
+    public DateTime RatingStartDtm { get; set; }
+    public DateTime RatingEndDtm { get; set; }
+    public decimal TheorWin { get; set; }
+    public decimal Bet { get; set; }
+    public decimal CasinoWin { get; set; }
+    public decimal Point { get; set; }
+    public decimal Dollar { get; set; }
+    public decimal Comp { get; set; }
+    public decimal Ebonus { get; set; }
+    public decimal Mcomp { get; set; }
+    public int CardTier { get; set; }
+    public string CasinoCode { get; set; }
+    public string DeptCode { get; set; }
+    public string GameCode { get; set; }
+    public string BetType { get; set; }
+    public string ChipSet { get; set; }
+    public string LocnCode { get; set; }
+    public string LocnInfo3 { get; set; }
+    public string LocnInfo4 { get; set; }
+    public string DenomCode { get; set; }
+    public string StratId { get; set; }
+    public string StrategyCode { get; set; }
+    public string RatingCategory { get; set; }
+    public string ReportSegment { get; set; }
+    public string ReportGroup { get; set; }
+    public string ReportArea { get; set; }
+    public string Segment { get; set; }
+    public string SlotLocation { get; set; }
+    public string TableLocation { get; set; }
+    public bool IsVoid { get; set; }
+    // 注意：updated_at 是資料庫端自動更新的，C# 物件中不需要
 }
 ```
 
-**說明：**
-*   我們定義了一個 `CasinoMapping` 類別。
-*   `HubCasinoCode` 使用 `required` 關鍵字 (C# 11+)，表示這個值在 JSON 中必須存在。如果您的 .NET 版本較低，可以移除 `required` 並確保它有非 null 的預設值或在建構函式中初始化。
-*   `LocnCode` 被定義為可為 null 的字串 (`string?`)，這完美地對應了 JSON 中可能不存在或值為 `null` 的情況。
-*   `[JsonPropertyName(...)]` 屬性是個好習慣，它可以確保即使您的 C# 屬性名稱與 JSON 鍵的大小寫或命名風格不同，也能正確綁定。
+### 使用 Npgsql Bulk Copy 的重構程式碼
 
----
-
-### 步驟 3：在 `Program.cs` 中綁定設定
-
-現在，我們需要在應用程式啟動時，告訴 .NET 如何讀取 `PropertyOptions` 區塊並將其轉換成我們的 C# 物件。這通常在 `Program.cs` (適用於 .NET 6+ 的 Minimal APIs) 或 `Startup.cs` (適用於舊版) 中完成。
-
-**Program.cs**
+您需要確保您的專案引用了 `Npgsql` 套件。Dapper 底層也是依賴它來與 PostgreSQL 通訊的。
 
 ```csharp
-using YourProjectName.Configuration; // 引入您的模型命名空間
+// 引入 Npgsql 命名空間
+using Npgsql;
+using NpgsqlTypes;
+using Dapper;
+using System.Collections.Generic;
+using System.Threading.Tasks;
 
-var builder = WebApplication.CreateBuilder(args);
-
-// ... 其他服務註冊，例如 AddControllers
-
-// --- 開始設定綁定 ---
-
-// 將 appsettings.json 中的 "PropertyOptions" 區塊
-// 綁定到 Dictionary<string, CasinoMapping> 型別上。
-// 這樣我們就可以在任何需要的地方透過 IOptions<T> 來注入它。
-builder.Services.Configure<Dictionary<string, CasinoMapping>>(
-    builder.Configuration.GetSection("PropertyOptions")
-);
-
-// --- 結束設定綁定 ---
-
-
-var app = builder.Build();
-
-// ... 中介軟體設定
-
-app.Run();
-```
-
-**說明：**
-*   `builder.Configuration.GetSection("PropertyOptions")` 會讀取 `appsettings.json` 中的 `PropertyOptions` 區塊。
-*   `builder.Services.Configure<T>()` 會將這個設定區塊註冊到依賴注入容器中，並設定它應該被綁定到 `Dictionary<string, CasinoMapping>` 這個型別。
-
----
-
-### 步驟 4：在服務中使用設定
-
-最後，您可以在任何透過依賴注入建立的服務（例如 Controller 或您自己的服務 `CompRedeemService`）中，輕鬆地使用這些設定。
-
-**CompRedeemService.cs**
-
-```csharp
-using Microsoft.Extensions.Options;
-using YourProjectName.Configuration; // 引入您的模型命名空間
-
-public class CompRedeemService
+public class EarningRatingRepository
 {
-    private readonly Dictionary<string, CasinoMapping> _propertyOptions;
+    private readonly string _connectionString;
 
-    // 透過建構函式注入 IOptions<T>
-    public CompRedeemService(IOptions<Dictionary<string, CasinoMapping>> propertyOptions)
+    public EarningRatingRepository(string connectionString)
     {
-        // .Value 屬性會回傳已經綁定好的 Dictionary 物件
-        _propertyOptions = propertyOptions.Value;
+        _connectionString = connectionString;
     }
 
     /// <summary>
-    /// 根據傳入的 Opera Casino Code 取得對應的 Hub Casino Code。
+    /// 使用 Bulk Copy 高效地批量寫入或更新評級資料
     /// </summary>
-    /// <param name="operaCasinoCode">例如 "GHM" 或 "SWH"</param>
-    /// <returns>對應的 Hub Casino Code，如果找不到則回傳 null。</returns>
-    public string? GetHubCasinoCode(string operaCasinoCode)
+    /// <param name="ratings">要寫入的評級資料集合</param>
+    /// <returns>受影響的行數</returns>
+    public async Task<int> WriteToDbBulkCopy(IEnumerable<QualifyingRating> ratings)
     {
-        // 使用 TryGetValue 來安全地取得值，避免 KeyNotFoundException
-        if (_propertyOptions.TryGetValue(operaCasinoCode, out var mapping))
+        // 確保有資料需要處理
+        if (ratings == null || !ratings.Any())
         {
-            return mapping.HubCasinoCode;
+            return 0;
         }
 
-        // 如果在設定中找不到對應的 key，可以根據業務邏輯回傳 null 或拋出例外
-        return null;
-    }
+        // 1. 建立連接並開啟
+        // NpgsqlConnection 是實現 Bulk Copy 的關鍵
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync();
 
-    /// <summary>
-    /// 示範如何取得完整的映射物件
-    /// </summary>
-    public void ProcessCasino(string operaCasinoCode)
-    {
-        if (_propertyOptions.TryGetValue(operaCasinoCode, out var mapping))
+        // 2. 開啟一個事務，確保操作的原子性
+        // 臨時表的建立、資料匯入、合併操作應該在同一個事務中完成
+        await using var transaction = await connection.BeginTransactionAsync();
+
+        // 3. 建立一個臨時表，ON COMMIT DROP 確保事務結束後自動刪除
+        // 臨時表的結構應該和目標表 earning_qualified_ratings 一致
+        // 使用 LIKE 語法可以快速複製表結構
+        var tempTableName = "temp_earning_ratings";
+        await connection.ExecuteAsync($"CREATE TEMP TABLE {tempTableName} (LIKE earning_qualified_ratings INCLUDING DEFAULTS) ON COMMIT DROP;");
+
+        // 4. 使用 Npgsql 的二進位匯入器 (BinaryImporter) 進行 Bulk Copy
+        // 這是最高效能的部分
+        // 注意：欄位順序必須和下面的 importer.Write() 順序完全一致
+        var copyCommand = $@"
+            COPY {tempTableName} (
+                rating_type, tran_id, acct, player_id, void_tran_id,
+                gaming_dt, post_dtm, modified_dtm, rating_start_dtm, rating_end_dtm,
+                theor_win, bet, casino_win,
+                point, dollar, comp, ebonus, mcomp,
+                card_tier, casino_code, dept_code, game_code, bet_type, chip_set,
+                locn_code, locn_info3, locn_info4,
+                denom_code, strat_id, strategy_code, rating_category,
+                report_segment, report_group, report_area, segment,
+                slot_location, table_location, is_void
+            ) FROM STDIN (FORMAT BINARY)";
+        
+        await using (var importer = await connection.BeginBinaryImportAsync(copyCommand))
         {
-            Console.WriteLine($"Processing for {operaCasinoCode}:");
-            Console.WriteLine($"  Hub Code: {mapping.HubCasinoCode}");
-            Console.WriteLine($"  Location Code: {mapping.LocnCode ?? "N/A"}"); // 使用 ?? 運算子處理 null
+            foreach (var rating in ratings)
+            {
+                await importer.StartRowAsync();
+
+                // 按照 COPY 命令中定義的順序寫入每個欄位
+                // 注意處理可為 null 的值，並指定正確的 NpgsqlDbType
+                await importer.WriteAsync(rating.RatingType, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.TranId, NpgsqlDbType.Bigint);
+                await importer.WriteAsync(rating.Acct, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.PlayerId, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.VoidTranId, NpgsqlDbType.Bigint); // WriteAsync 會自動處理 C# null 到 DB NULL
+                await importer.WriteAsync(rating.GamingDt, NpgsqlDbType.TimestampTz); // 假設是 timestamptz
+                await importer.WriteAsync(rating.PostDtm, NpgsqlDbType.TimestampTz);
+                await importer.WriteAsync(rating.ModifiedDtm, NpgsqlDbType.TimestampTz);
+                await importer.WriteAsync(rating.RatingStartDtm, NpgsqlDbType.TimestampTz);
+                await importer.WriteAsync(rating.RatingEndDtm, NpgsqlDbType.TimestampTz);
+                await importer.WriteAsync(rating.TheorWin, NpgsqlDbType.Numeric);
+                await importer.WriteAsync(rating.Bet, NpgsqlDbType.Numeric);
+                await importer.WriteAsync(rating.CasinoWin, NpgsqlDbType.Numeric);
+                await importer.WriteAsync(rating.Point, NpgsqlDbType.Numeric);
+                await importer.WriteAsync(rating.Dollar, NpgsqlDbType.Numeric);
+                await importer.WriteAsync(rating.Comp, NpgsqlDbType.Numeric);
+                await importer.WriteAsync(rating.Ebonus, NpgsqlDbType.Numeric);
+                await importer.WriteAsync(rating.Mcomp, NpgsqlDbType.Numeric);
+                await importer.WriteAsync(rating.CardTier, NpgsqlDbType.Integer);
+                await importer.WriteAsync(rating.CasinoCode, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.DeptCode, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.GameCode, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.BetType, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.ChipSet, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.LocnCode, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.LocnInfo3, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.LocnInfo4, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.DenomCode, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.StratId, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.StrategyCode, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.RatingCategory, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.ReportSegment, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.ReportGroup, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.ReportArea, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.Segment, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.SlotLocation, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.TableLocation, NpgsqlDbType.Varchar);
+                await importer.WriteAsync(rating.IsVoid, NpgsqlDbType.Boolean);
+            }
+
+            // 完成匯入
+            await importer.CompleteAsync();
         }
-        else
-        {
-            Console.WriteLine($"No configuration found for {operaCasinoCode}.");
-        }
+
+        // 5. 執行合併 (Upsert) 邏輯
+        // 從臨時表將資料 INSERT 或 UPDATE 到目標表
+        // 這和您原來的 ON CONFLICT 邏輯幾乎一樣，只是資料來源變成了臨時表
+        var mergeSql = $@"
+            INSERT INTO earning_qualified_ratings (
+                rating_type, tran_id, acct, player_id, void_tran_id,
+                gaming_dt, post_dtm, modified_dtm, rating_start_dtm, rating_end_dtm,
+                theor_win, bet, casino_win, point, dollar, comp, ebonus, mcomp,
+                card_tier, casino_code, dept_code, game_code, bet_type, chip_set,
+                locn_code, locn_info3, locn_info4, denom_code, strat_id, strategy_code, rating_category,
+                report_segment, report_group, report_area, segment, slot_location, table_location, is_void
+            )
+            SELECT 
+                rating_type, tran_id, acct, player_id, void_tran_id,
+                gaming_dt, post_dtm, modified_dtm, rating_start_dtm, rating_end_dtm,
+                theor_win, bet, casino_win, point, dollar, comp, ebonus, mcomp,
+                card_tier, casino_code, dept_code, game_code, bet_type, chip_set,
+                locn_code, locn_info3, locn_info4, denom_code, strat_id, strategy_code, rating_category,
+                report_segment, report_group, report_area, segment, slot_location, table_location, is_void
+            FROM {tempTableName}
+            ON CONFLICT (earning_qualified_ratings_pkey) DO UPDATE SET
+                player_id = excluded.player_id,
+                void_tran_id = excluded.void_tran_id,
+                post_dtm = excluded.post_dtm,
+                modified_dtm = excluded.modified_dtm,
+                rating_start_dtm = excluded.rating_start_dtm,
+                rating_end_dtm = excluded.rating_end_dtm,
+                theor_win = excluded.theor_win,
+                bet = excluded.bet,
+                casino_win = excluded.casino_win,
+                point = excluded.point,
+                dollar = excluded.dollar,
+                comp = excluded.comp,
+                ebonus = excluded.ebonus,
+                mcomp = excluded.mcomp,
+                card_tier = excluded.card_tier,
+                casino_code = excluded.casino_code,
+                dept_code = excluded.dept_code,
+                game_code = excluded.game_code,
+                bet_type = excluded.bet_type,
+                chip_set = excluded.chip_set,
+                locn_code = excluded.locn_code,
+                locn_info3 = excluded.locn_info3,
+                locn_info4 = excluded.locn_info4,
+                denom_code = excluded.denom_code,
+                strat_id = excluded.strat_id,
+                strategy_code = excluded.strategy_code,
+                rating_category = excluded.rating_category,
+                report_segment = excluded.report_segment,
+                report_group = excluded.report_group,
+                report_area = excluded.report_area,
+                segment = excluded.segment,
+                slot_location = excluded.slot_location,
+                table_location = excluded.table_location,
+                is_void = excluded.is_void,
+                updated_at = now();";
+
+        var affectedRows = await connection.ExecuteAsync(mergeSql, transaction: transaction);
+
+        // 6. 提交事務
+        await transaction.CommitAsync();
+
+        return affectedRows;
     }
 }
 ```
 
-**說明：**
-*   我們在建構函式中注入 `IOptions<Dictionary<string, CasinoMapping>>`。這是 .NET 中處理設定的標準模式。
-*   透過 `propertyOptions.Value`，我們可以取得已完全填充資料的 `Dictionary` 物件。
-*   在方法中，您現在可以像操作任何標準字典一樣操作 `_propertyOptions`，並且可以存取 `CasinoMapping` 物件的強型別屬性 `HubCasinoCode` 和 `LocnCode`。
-*   使用 `TryGetValue` 是比直接使用 `_propertyOptions[key]` 更安全的方式，因為它不會在找不到鍵時拋出例外。
+### 程式碼解釋與注意事項
 
-### 結論
+1.  **`NpgsqlConnection`**: 我們直接使用 `Npgsql` 的連接物件，而不是依賴 Dapper 的擴充方法來開啟連接，因為我們需要呼叫 `BeginBinaryImportAsync` 這個 `Npgsql` 特有的方法。
+2.  **事務 (`BeginTransactionAsync`)**: 這是至關重要的。整個「建立臨時表 -> 匯入資料 -> 合併資料」的過程必須是原子的。如果中途任何一步失敗，整個事務都會回滾，不會留下髒資料或不完整的臨時表。
+3.  **`CREATE TEMP TABLE ... ON COMMIT DROP`**: 這是建立臨時表的最佳實踐。`TEMP` 或 `TEMPORARY` 關鍵字表示這個表只在當前的資料庫會話中可見。`ON COMMIT DROP` 確保在事務成功提交時，這個臨時表會被自動刪除，無需手動 `DROP`。
+4.  **`BeginBinaryImportAsync`**: 這是執行 Bulk Copy 的核心。它接收一個 `COPY ... FROM STDIN (FORMAT BINARY)` 命令。
+    *   `COPY ... FROM STDIN`: 告訴 PostgreSQL 資料將從客戶端標準輸入流中傳入。
+    *   `(FORMAT BINARY)`: 使用二進位格式傳輸資料。這比文字格式更高效，也避免了轉義、引號等複雜問題。
+5.  **`importer.WriteAsync()`**: 在迴圈中，我們將每個物件的每個屬性按照 `COPY` 命令中聲明的順序寫入匯入器。
+    *   **類型匹配**: `NpgsqlDbType` 必須與資料庫欄位的類型精確匹配（或可隱式轉換）。例如，`DateTime` 對應 `TimestampTz` 或 `Timestamp`，`decimal` 對應 `Numeric`，`string` 對應 `Varchar` 或 `Text`。請務必檢查您的表定義以確保類型正確。
+    *   **Null 處理**: `importer.WriteAsync` 方法可以很好地處理 C# 中的 `null` 值，它會自動將其轉換為資料庫的 `NULL`。
+6.  **合併 SQL (`INSERT ... ON CONFLICT`)**: 最後這一步，我們執行一條 SQL。這條 SQL 的邏輯和您原來的一樣，但它的資料來源是我們剛剛填充好的臨時表 `temp_earning_ratings`，而不是客戶端傳來的一個個參數。`excluded` 虛擬表代表了如果發生衝突時，試圖插入的那一行新資料。
+7.  **效能**: 這種方法的效能遠超 Dapper 的迴圈執行。資料只在 C# 端被序列化一次，然後通過一個高效的流一次性傳輸到 PostgreSQL。所有的 `UPDATE` 和 `INSERT` 判斷都在資料庫伺服器端完成，這是最高效的方式。
 
-透過以上四個步驟，您就成功地將設定重構為一個更健壯、可維護且易於使用的結構。這種方法有以下好處：
-
-*   **強型別安全**：編譯器會檢查您的屬性名稱（例如 `mapping.HubCasinoCode`），減少因打錯字而導致的執行期錯誤。
-*   **可讀性與意圖清晰**：`appsettings.json` 的結構更清晰，`CasinoMapping` 類別也明確地表達了資料的意圖。
-*   **智慧提示 (IntelliSense)**：在 Visual Studio 或 VS Code 中撰寫程式碼時，您會得到完整的屬性自動完成提示。
-*   **易於擴展**：如果未來需要為每個 casino 新增更多設定（例如 `IsEnabled` 旗標），您只需在 `CasinoMapping` 類別和 `appsettings.json` 中新增欄位即可，無需修改解析邏輯。
-
-希望這個詳細的建議對您有幫助！
+將您原來的 `WriteToDb` 方法替換為這個 `WriteToDbBulkCopy` 方法，您將會看到在處理大量資料時效能的巨大提升。
