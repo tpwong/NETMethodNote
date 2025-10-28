@@ -1,328 +1,291 @@
 *Thinking...*
 
-> **Examining the Core Technologies**
+> **Analyzing User Needs Now**
 > 
-> I've been breaking down the user's requirements. Currently, I'm concentrating on the primary technologies at play. .NET 8 will be the foundation, with Elasticsearch/Kibana serving as the data source. I am now refining the exact data selection needed.
-> 
-> 
-> **Addressing the User's Query**
-> 
-> I'm now focusing on the specific query construction using the Elasticsearch client. I've confirmed compatibility with .NET 8.  I'm exploring the best practices for handling query parameters and constructing the correct JSON format for the Elasticsearch query DSL. Considering the user's intent, I'll showcase a simple example of selecting data by index and potentially filtering it by a few common criteria.
+> I'm currently focused on the user's primary objective: extracting the `Body` field. I'm taking the core goal and the implicit context from prior interactions, working to define a refined C# code implementation. The aim is to create the most efficient and straightforward solution for this specific request.
 > 
 > 
-> **Developing the Solution's Structure**
+> **Defining the Code's Function**
 > 
-> I'm now outlining the response's structure, ensuring clarity for the user.  I'll start with a direct "yes, you can" followed by clarifying the role of Elasticsearch versus Kibana.  The focus will be on the official .NET client and its use, providing a practical, step-by-step guide.  I'll include code snippets demonstrating index selection and basic filtering techniques. Finally,  a note about error handling and connection management will be added for completeness.
-> 
-> 
-> **Structuring the Code Example**
-> 
-> I'm presently building the code samples. I'll showcase how to configure the client using an API key and how to define a simple POCO. Next, I'll demonstrate the query itself, targeting a specific index and implementing a basic filtering. The example will highlight how to retrieve and display the results, and will include essential error handling.
+> My focus has shifted to coding the implementation. I'm exploring the `Elasticsearch` library's `SearchAsync` method for source filtering, which seems optimal. The goal now is to efficiently retrieve just the `Body` field, minimizing unnecessary data transfer and processing. I'm recalling (or will check) how to use the `.Source()` method within the search descriptor for this specific purpose.
 > 
 > 
-> **Constructing the Outline**
+> **Formulating the Implementation**
 > 
-> I'm presently building the full code example, which is the core of this answer. I'll include the program setup, including the essential NuGet package. I plan to incorporate connecting to the Elasticsearch cluster using an API key and an example POCO, like LogEntry. After that, I will construct a simple "match all" query followed by a "match" filter.
-> 
-> 
-> **Formulating the Code's Structure**
-> 
-> I am now organizing the code into logical segments. I will be including configuration, the example data model (POCO), the essential connection setup, and finally, the example queries with filtering. The goal is a complete and easily understood .NET 8 console application.
+> Now I'm deep into the coding. I've broken down the user's need, and I'm concentrating on the source filtering approach in the C# code using the `Elastic.Clients.Elasticsearch` library. I've just finalized the thought process on how to refine the data model, opting for a `LogBodyOnly` class to enhance efficiency, and I'm ready to write the main part of the function.
 > 
 > 
-> **Formulating the Full Response**
+> **Finalizing Code Logic**
 > 
-> I'm now drafting the complete response. I've broken down the user's requirements and my planned steps. The focus is now on the full code example, which includes all necessary setup, connection details, data model, and query implementation. I'm also preparing for the advanced topic: Elasticsearch SQL.
+> I'm presently building the C# code, adapting the prior code base for the specified requirements. I'm focusing on incorporating source filtering using the `.Source()` method and `.Includes()` within the search descriptor. The approach entails refining the data model with a `LogBodyOnly` class and rewriting the `QueryAndExtractBodyAsync` method, specifically targeting the efficient extraction of the `Body` field from the Elasticsearch documents, optimizing for minimal data transfer and a clean, concise implementation.
 > 
 > 
-好的，這是一個非常常見且實用的需求。答案是：**可以，您絕對可以使用 .NET 8 來查詢 (select) Elasticsearch 中的資料，而 Kibana 只是 Elasticsearch 的一個視覺化管理介面。**
+> **Optimizing the Implementation**
+> 
+> I'm presently refactoring the code, specifically addressing source filtering for efficiency. The core focus is the `.Source()` method and its `.Includes()` configuration in the search descriptor of the `Elastic.Clients.Elasticsearch` library. I've successfully refined the `LogBodyOnly` class and the structure for the `QueryAndExtractBodyAsync` method. I'm now ready to test the refined function.
+> 
+> 
+> **Coding the Solution's Core**
+> 
+> I'm presently refactoring the code, specifically addressing source filtering for efficiency. The core focus is the `.Source()` method and its `.Includes()` configuration in the search descriptor of the `Elastic.Clients.Elasticsearch` library. I've successfully refined the `LogBodyOnly` class and the structure for the `QueryAndExtractBodyAsync` method. My thoughts have shifted to integrating the parsing of `Body` content.
+> 
+> 
+> **Coding the Complete Solution**
+> 
+> I'm synthesizing the code, using the previous examples, focusing on the refined data model (`LogBodyOnly`) and the .Source() filtering. I'm adapting the method with the `SearchAsync` call, specifically incorporating the `.Includes()` method, ensuring it's strongly typed, utilizing a `LogBodyOnly` class, and ensuring the data processing loop aligns with the new data model. I will add an explanation on why this approach is superior.
+> 
+> 
+當然可以！如果您的目標只是從符合條件的 Elasticsearch 文件中提取 `Body` 欄位的內容，我們可以優化查詢，讓 Elasticsearch 只回傳這個欄位。這樣做效率更高，因為它減少了網路傳輸的資料量和 C# 客戶端需要反序列化的資料。
 
-讓我為您詳細解釋整個流程，並提供完整的程式碼範例。
+這個技術稱為 **Source Filtering**。
 
-### 核心概念釐清：Kibana vs. Elasticsearch
+### 步驟 1：簡化 C# 資料模型
 
-首先，最重要的一點是，您要查詢的對象其實是 **Elasticsearch**，而不是 Kibana。
-
-*   **Elasticsearch**：是一個分散式、RESTful 風格的**搜尋與分析引擎**。它負責儲存、索引和搜尋您的資料。您的 Log、文件、指標等所有原始資料都存放在 Elasticsearch 的 Index（類似於資料庫中的 Table）裡面。
-*   **Kibana**：是一個**視覺化和管理工具**。它本身不儲存資料。Kibana 會向 Elasticsearch 發送查詢請求，然後將獲取的資料以圖表、儀表板、表格等友善的方式呈現給您。
-
-所以，當您在 Kibana 的 Discover 介面看到資料時，背後其實是 Kibana 幫您向 Elasticsearch 執行了查詢。您的 .NET 應用程式要做的是**繞過 Kibana，直接與 Elasticsearch API 進行通訊**來獲取資料。
-
----
-
-### 如何用 .NET 8 實現
-
-要在 .NET 8 中查詢 Elasticsearch，最推薦的方法是使用官方提供的 .NET 客戶端函式庫：`Elastic.Clients.Elasticsearch`。這是一個現代、強型別、非同步的函式庫，專為 .NET 設計。
-
-以下是詳細的步驟：
-
-#### 第 1 步：建立專案並安裝 NuGet 套件
-
-1.  開啟您的終端機或命令提示字元。
-2.  建立一個新的 .NET 8 主控台應用程式：
-    ```bash
-    dotnet new console -n ElasticsearchQueryApp
-    cd ElasticsearchQueryApp
-    ```
-3.  安裝官方的 Elasticsearch .NET Client 函式庫：
-    ```bash
-    dotnet add package Elastic.Clients.Elasticsearch
-    ```
-
-#### 第 2 步：準備連線資訊
-
-您需要從您的 Elasticsearch 叢集取得以下資訊：
-
-1.  **Elasticsearch URL**：通常是 `https://your-elasticsearch-url:9200` 這樣的格式。
-2.  **驗證憑證**：出於安全考量，強烈建議使用 **API Key**。如果沒有，也可以使用使用者名稱和密碼，但 API Key 更安全、更易於管理。您可以從 Kibana 的 "Stack Management" -> "API Keys" 介面產生一個。
-
-#### 第 3 步：撰寫 C# 程式碼
-
-現在，我們來編寫程式碼，連接到 Elasticsearch 並執行查詢。
-
-##### 3.1 定義資料模型 (POCO)
-
-為了讓 `Elastic.Clients.Elasticsearch` 能夠將從 Elasticsearch 回傳的 JSON 文件自動反序列化為 C# 物件，最好先定義一個與您 Index 中文件結構對應的 C# 類別 (POCO - Plain Old C# Object)。
-
-假設您在 Kibana 中看到的 Index (`your-index-name`) 裡的資料長得像這樣：
-```json
-{
-  "@timestamp": "2023-10-27T10:30:00.123Z",
-  "level": "Error",
-  "message": "Failed to process payment for order 123.",
-  "service": "payment-gateway"
-}
-```
-
-您可以定義如下的 C# 類別：
+既然我們只關心 `Body` 欄位，就不再需要那個包含所有欄位的龐大 `ApiAccessLog` 類別了。我們可以定義一個只包含 `Body` 屬性的新類別。
 
 ```csharp
-using System.Text.Json.Serialization;
-
-public class LogEntry
+// 一個只用來接收 Body 欄位的精簡類別
+public class LogBodyOnly
 {
-    // 使用 JsonPropertyName 來對應 Elasticsearch 中的欄位名稱
-    [JsonPropertyName("@timestamp")]
-    public DateTimeOffset Timestamp { get; set; }
-
-    [JsonPropertyName("level")]
-    public string? Level { get; set; }
-
-    [JsonPropertyName("message")]
-    public string? Message { get; set; }
-
-    [JsonPropertyName("service")]
-    public string? Service { get; set; }
+    [JsonPropertyName("Body")]
+    public string? Body { get; set; }
 }
 ```
-> **注意**：使用 `JsonPropertyName` 屬性是很好的習慣，因為 C# 的命名慣例 (PascalCase) 和 JSON 的命名慣例 (camelCase 或 snake_case) 通常不同。
 
-##### 3.2 完整程式碼範例
+我們仍然需要之前定義的、用來解析 `Body` 內容的那些類別 (`RequestBody`, `RatingUpdatePayload` 等)，所以我們會保留它們。
 
-以下是一個完整的 `Program.cs` 檔案，示範如何連線、執行一個簡單的查詢（相當於 `SELECT *`）和一個帶有條件的查詢（相當於 `SELECT * WHERE level = 'Error'`）。
+### 步驟 2：修改查詢以使用 Source Filtering
 
-請將 `Program.cs` 的內容替換為以下程式碼：
+我們將在 `SearchAsync` 請求中加入 `.Source()` 方法，並明確告訴 Elasticsearch 我們只想要 `Body` 這個欄位。
+
+以下是完整的、修改後的 C# 程式碼。
 
 ```csharp
 using Elastic.Clients.Elasticsearch;
 using Elastic.Transport;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 // --- 1. 設定您的連線資訊 ---
-// 將此處的值替換為您自己的 Elasticsearch URL
 const string EsUrl = "https://your-elasticsearch-url:9200"; 
-
-// 建議使用 API Key 進行驗證
-// 您可以在 Kibana > Management > Security > API Keys 中產生
 const string ApiKey = "your_base64_encoded_api_key"; 
 
-// 您要查詢的 Index 名稱
-const string IndexName = "your-index-name"; // 例如 "logs-prod-*"
+// 使用萬用字元 (*) 來匹配所有 api_access_log-* 的 index
+const string IndexName = "api_access_log-*";
 
-// --- 2. 定義對應 Index 文件結構的 C# 類別 (POCO) ---
-public class LogEntry
-{
-    [JsonPropertyName("@timestamp")]
-    public DateTimeOffset Timestamp { get; set; }
-
-    [JsonPropertyName("level")]
-    public string? Level { get; set; }
-
-    [JsonPropertyName("message")]
-    public string? Message { get; set; }
-
-    [JsonPropertyName("service")]
-    public string? Service { get; set; }
-}
-
-
-// --- 3. 主程式 ---
+// --- 2. 主程式 ---
 public class Program
 {
     public static async Task Main(string[] args)
     {
         Console.WriteLine("正在建立 Elasticsearch 客戶端...");
 
-        // --- 4. 建立 ElasticsearchClient ---
-        // 設定連線設定
         var settings = new ElasticsearchClientSettings(new Uri(EsUrl))
-            // 使用 API Key 驗證 (推薦)
             .Authentication(new ApiKey(ApiKey))
-            // 如果您的 Elasticsearch 使用自簽署憑證，需要加入此行。正式環境建議使用受信任的憑證。
-            .ServerCertificateValidationCallback(CertificateValidations.AllowAll)
-            // 設定預設要操作的 Index，這樣後續查詢就不用一直重複指定
+            .ServerCertificateValidationCallback(CertificateValidations.AllowAll) // 開發時使用，正式環境請用正式憑證
             .DefaultIndex(IndexName);
-        
-        /*
-        // 如果您只能使用使用者名稱和密碼，請改用以下驗證方式：
-        const string Username = "your_username";
-        const string Password = "your_password";
-        var settings = new ElasticsearchClientSettings(new Uri(EsUrl))
-            .Authentication(new BasicAuthentication(Username, Password))
-            .ServerCertificateValidationCallback(CertificateValidations.AllowAll)
-            .DefaultIndex(IndexName);
-        */
 
         var client = new ElasticsearchClient(settings);
 
         Console.WriteLine("客戶端建立成功！");
         Console.WriteLine("----------------------------------------");
 
-        // --- 5. 執行查詢 ---
-
-        // 範例 A: 簡單查詢 - 取得最新的 10 筆資料 (類似 SELECT * ... LIMIT 10)
-        await QueryAllDocumentsAsync(client);
-
-        Console.WriteLine("----------------------------------------");
-
-        // 範例 B: 條件查詢 - 取得所有 level 為 "Error" 的日誌
-        await QueryWithFilterAsync(client);
+        // --- 3. 執行查詢並只提取 Body 欄位 ---
+        await QueryAndExtractBodyAsync(client);
     }
 
-    private static async Task QueryAllDocumentsAsync(ElasticsearchClient client)
+    private static async Task QueryAndExtractBodyAsync(ElasticsearchClient client)
     {
-        Console.WriteLine("執行簡單查詢：取得最新的 10 筆日誌...");
+        Console.WriteLine("執行查詢：Service='Rating' AND Endpoint='POST /api/rating/ratingUpdate'");
+        Console.WriteLine("優化：只從 _source 提取 'Body' 欄位。");
 
-        // 使用 SearchAsync<T> 方法，並傳入我們的資料模型 LogEntry
-        var response = await client.SearchAsync<LogEntry>(s => s
-            .Index(IndexName) // 指定要查詢的 Index
-            .Size(10)         // 指定回傳的文件數量 (LIMIT)
-            .Sort(so => so.Field("@timestamp", new FieldSort { Order = SortOrder.Desc })) // 按時間戳降序排列
-        );
-
-        // 檢查請求是否成功
-        if (response.IsValidResponse)
-        {
-            Console.WriteLine($"查詢成功！共找到 {response.Total} 筆資料，顯示前 {response.Documents.Count} 筆：");
-            foreach (var log in response.Documents)
-            {
-                Console.WriteLine($"  [{log.Timestamp:yyyy-MM-dd HH:mm:ss}] [{log.Level}] - {log.Message}");
-            }
-        }
-        else
-        {
-            Console.WriteLine("查詢失敗！");
-            // response.DebugInformation 提供了詳細的錯誤資訊，非常有用
-            Console.WriteLine(response.DebugInformation);
-        }
-    }
-
-    private static async Task QueryWithFilterAsync(ElasticsearchClient client)
-    {
-        const string searchLevel = "Error";
-        Console.WriteLine($"執行條件查詢：尋找 level 為 '{searchLevel}' 的日誌...");
-
-        var response = await client.SearchAsync<LogEntry>(s => s
+        var response = await client.SearchAsync<LogBodyOnly>(s => s
             .Index(IndexName)
             .Size(10)
+            .Sort(so => so.Field("CreatedDtm", new FieldSort { Order = SortOrder.Desc }))
             .Query(q => q
-                // 使用 Match 查詢，這是全文檢索或關鍵字查詢的常用方法
-                .Match(m => m
-                    .Field(f => f.Level) // 指定要查詢的欄位
-                    .Query(searchLevel)   // 指定要匹配的值
+                .Bool(b => b
+                    .Must(
+                        m => m.Match(mt => mt.Field("Service").Query("Rating")),
+                        m => m.Match(mt => mt.Field("Endpoint").Query("POST /api/rating/ratingUpdate"))
+                    )
                 )
             )
-            .Sort(so => so.Field("@timestamp", new FieldSort { Order = SortOrder.Desc }))
+            // --- 關鍵修改：使用 Source Filtering ---
+            // 告訴 Elasticsearch 在回傳的 _source 中只包含 "Body" 欄位
+            .Source(src => src
+                .Includes(i => i.Field(f => f.Body))
+            )
         );
 
         if (response.IsValidResponse)
         {
-            Console.WriteLine($"查詢成功！共找到 {response.Total} 筆 '{searchLevel}' 日誌，顯示最新的 {response.Documents.Count} 筆：");
+            Console.WriteLine($"\n查詢成功！共找到 {response.Total} 筆符合條件的資料。");
+            Console.WriteLine("以下是每筆資料的 Body 內容 (已解析)：");
+
+            var jsonOptions = new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true,
+            };
+
+            int docIndex = 1;
             foreach (var log in response.Documents)
             {
-                Console.WriteLine($"  [{log.Timestamp:yyyy-MM-dd HH:mm:ss}] [{log.Service}] - {log.Message}");
+                Console.WriteLine($"\n--- Document #{docIndex++} Body ---");
+
+                if (!string.IsNullOrEmpty(log.Body))
+                {
+                    try
+                    {
+                        // 將 Body 字串反序列化為 RequestBody 物件
+                        var parsedBody = JsonSerializer.Deserialize<RequestBody>(log.Body, jsonOptions);
+
+                        if (parsedBody != null)
+                        {
+                            Console.WriteLine($"  Message ID: {parsedBody.Header?.MessageId}");
+                            Console.WriteLine($"  Operation: {parsedBody.Header?.Operation}");
+                            
+                            if (parsedBody.RatingUpdate != null)
+                            {
+                                Console.WriteLine($"  Rating ID: {parsedBody.RatingUpdate.RatingId}");
+                                Console.WriteLine($"  Account: {parsedBody.RatingUpdate.RatingDetail?.Account}");
+                                Console.WriteLine($"  Casino: {parsedBody.RatingUpdate.RatingDetail?.CasinoCode}");
+                                Console.WriteLine($"  Table: {parsedBody.RatingUpdate.RatingDetail?.TableName}");
+                                Console.WriteLine($"  Total Bets: {parsedBody.RatingUpdate.Bets?.Count ?? 0}");
+                            }
+                        }
+                    }
+                    catch (JsonException ex)
+                    {
+                        Console.WriteLine($"  無法解析 Body JSON: {ex.Message}");
+                        Console.WriteLine($"  原始 Body 字串: {log.Body}");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("  (Body 欄位為空或不存在)");
+                }
             }
         }
         else
         {
-            Console.WriteLine("查詢失敗！");
+            Console.WriteLine("查詢失敗！請檢查連線資訊、Index名稱和查詢語法。");
             Console.WriteLine(response.DebugInformation);
         }
     }
 }
+
+
+// --- 4. 資料模型 (POCOs) ---
+
+// 精簡版模型，只用來接收 Body
+public class LogBodyOnly
+{
+    [JsonPropertyName("Body")]
+    public string? Body { get; set; }
+}
+
+// --- 以下是解析 Body 內部 JSON 所需的模型 (與之前相同) ---
+
+public class RequestBody
+{
+    [JsonPropertyName("header")]
+    public RequestHeader? Header { get; set; }
+
+    [JsonPropertyName("ratingUpdate")]
+    public RatingUpdatePayload? RatingUpdate { get; set; }
+}
+
+public class RequestHeader
+{
+    [JsonPropertyName("messageID")]
+    public string? MessageId { get; set; }
+
+    [JsonPropertyName("operation")]
+    public string? Operation { get; set; }
+
+    [JsonPropertyName("timeStamp")]
+    public string? TimeStamp { get; set; }
+}
+
+public class RatingUpdatePayload
+{
+    [JsonPropertyName("ratingID")]
+    public long RatingId { get; set; }
+
+    [JsonPropertyName("ratingDetail")]
+    public RatingDetail? RatingDetail { get; set; }
+
+    [JsonPropertyName("winLoss")]
+    public List<WinLossItem>? WinLoss { get; set; }
+
+    [JsonPropertyName("bets")]
+    public List<BetItem>? Bets { get; set; }
+}
+
+public class RatingDetail
+{
+    [JsonPropertyName("acct")]
+    public string? Account { get; set; }
+
+    [JsonPropertyName("isManual")]
+    public bool IsManual { get; set; }
+
+    [JsonPropertyName("seatNum")]
+    public int SeatNum { get; set; }
+
+    [JsonPropertyName("supervisorEmpID")]
+    public string? SupervisorEmpId { get; set; }
+
+    [JsonPropertyName("dealerEmpID")]
+    public string? DealerEmpId { get; set; }
+
+    [JsonPropertyName("casinoCode")]
+    public string? CasinoCode { get; set; }
+
+    [JsonPropertyName("tableName")]
+    public string? TableName { get; set; }
+}
+
+public class WinLossItem
+{
+    [JsonPropertyName("winLossCurrency")]
+    public string? WinLossCurrency { get; set; }
+
+    [JsonPropertyName("winLossAmt")]
+    public decimal WinLossAmt { get; set; }
+
+    [JsonPropertyName("winLossChipset")]
+    public string? WinLossChipset { get; set; }
+}
+
+public class BetItem
+{
+    [JsonPropertyName("betChipset")]
+    public string? BetChipset { get; set; }
+
+    [JsonPropertyName("betAmount")]
+    public decimal BetAmount { get; set; }
+
+    [JsonPropertyName("betWinLoss")]
+    public decimal BetWinLoss { get; set; }
+
+    [JsonPropertyName("betTheoWin")]
+    public decimal BetTheoWin { get; set; }
+}
 ```
 
-#### 第 4 步：執行程式
+### 程式碼變更重點
 
-1.  **修改程式碼**：將 `EsUrl`, `ApiKey`, 和 `IndexName` 的值換成您自己的。
-2.  在終端機中執行程式：
-    ```bash
-    dotnet run
-    ```
+1.  **新的 `LogBodyOnly` 類別**：我們用這個極簡的類別取代了原本龐大的 `ApiAccessLog` 類別，因為我們只關心 `Body` 欄位。
 
-如果一切設定正確，您將會在主控台中看到從 Elasticsearch 查詢回來的資料。
+2.  **`SearchAsync<LogBodyOnly>`**：查詢的泛型參數改為我們新的 `LogBodyOnly` 類別，這樣 Elasticsearch .NET 客戶端就知道要把回傳的 `_source` 映射到這個精簡的物件上。
 
-### 進階選項：使用 Elasticsearch SQL
+3.  **`.Source(src => src.Includes(i => i.Field(f => f.Body)))`**：這是最核心的變更。
+    *   `.Source()` 方法讓我們可以設定來源欄位過濾。
+    *   `.Includes()` 指定我們想要**包含**哪些欄位。
+    *   `i.Field(f => f.Body)` 是一個強型別的寫法，它會告訴 Elasticsearch 我們要 `LogBodyOnly` 類別中的 `Body` 屬性所對應的欄位。
 
-如果您的團隊對 SQL 非常熟悉，而對 Elasticsearch 的 Query DSL（我們在上面範例中使用的查詢語法）感到陌生，您也可以使用 Elasticsearch 的 SQL 功能。
+4.  **迴圈處理**：現在 `response.Documents` 是一個 `LogBodyOnly` 物件的集合。我們直接從 `log.Body` 取得字串並進行後續的 JSON 解析，程式碼流程更直接。
 
-`Elastic.Clients.Elasticsearch` 函式庫同樣支援 SQL 查詢。
-
-```csharp
-// 假設 client 已經建立好
-
-Console.WriteLine("\n--- 使用 SQL 查詢 ---");
-
-// 注意：FROM 後面的 Index 名稱需要用雙引號包起來
-var sqlQuery = $"SELECT \"@timestamp\", level, message FROM \"{IndexName}\" WHERE level = 'Error' ORDER BY \"@timestamp\" DESC LIMIT 5";
-
-var sqlResponse = await client.Sql.QueryAsync(q => q.Query(sqlQuery));
-
-if (sqlResponse.IsValidResponse)
-{
-    Console.WriteLine("SQL 查詢成功！");
-    // SQL 查詢的回傳格式是行列結構
-    foreach (var row in sqlResponse.Rows)
-    {
-        // row 是一個包含多個值的陣列，順序與 SELECT 語句中的欄位順序一致
-        // [0] -> @timestamp, [1] -> level, [2] -> message
-        var timestamp = (DateTimeOffset)row[0]!;
-        var level = (string)row[1]!;
-        var message = (string)row[2]!;
-        Console.WriteLine($"  [{timestamp:yyyy-MM-dd HH:mm:ss}] [{level}] - {message}");
-    }
-}
-else
-{
-    Console.WriteLine("SQL 查詢失敗！");
-    Console.WriteLine(sqlResponse.DebugInformation);
-}
-```
-
-**SQL vs. Query DSL**
-
-*   **SQL**：學習曲線平緩，適合簡單的查詢和習慣 SQL 的開發者。
-*   **Query DSL**：功能更強大，能處理複雜的全文檢索、地理位置查詢、聚合分析等，是 Elasticsearch 的原生查詢方式，效能通常也更好。
-
-### 總結
-
-總結一下，使用 .NET 8 查詢 Kibana/Elasticsearch 資料的完整流程是：
-
-1.  **釐清目標**：您要查詢的是 Elasticsearch。
-2.  **安裝函式庫**：在您的 .NET 專案中加入 `Elastic.Clients.Elasticsearch` 套件。
-3.  **設定連線**：提供 Elasticsearch URL 和驗證憑證（推薦 API Key）。
-4.  **定義模型**：建立一個 C# 類別來對應您 Index 中的資料結構。
-5.  **執行查詢**：使用 `client.SearchAsync()` 搭配 Query DSL（推薦）或 `client.Sql.QueryAsync()` 搭配 SQL 語法來獲取資料。
-6.  **處理結果**：檢查回應是否成功，並處理回傳的資料。
-
-這是在現代 .NET 應用中整合 Elasticsearch 資料的標準且高效的方法。
+這個版本不僅完全符合您的需求，而且在效能上更勝一籌。
