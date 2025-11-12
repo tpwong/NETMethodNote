@@ -261,4 +261,309 @@ public class DemoController : ControllerBase
 3.  **符合 .NET 設計哲學**：
     這種使用 `IHttpClientFactory` 搭配具名用戶端和 `DelegatingHandler` 的方式，是微軟官方推薦的最佳實踐，充分利用了 .NET 依賴注入和選項模式的強大能力。
 
-總結來說，您的情況**非常適合**使用 `DelegatingHandler`。它不僅不是「比較難使用」，反而是解決這類問題最標準、最優雅、最具擴展性的方案。它將設定、行為和業務邏輯完美地解耦，讓您的程式碼庫在未來更容易維護和擴展。
+總結來說，您的情況**非常適合**使用 `DelegatingHandler`。它不僅不是「比較難使用」，反而是解決這類問題
+
+最標準、最優雅、最具擴展性的方案。它將設定、行為和業務邏輯完美地解耦，讓您的程式碼庫在未來更容易維護和擴展。
+
+
+
+
+*Thinking...*
+
+> **Examining the Core Problem**
+> 
+> I've been drilling down on the user's need. The core problem is clear: expired access tokens. My focus now is on understanding the mechanism, specifically, the process of using a refresh token to get a new access token via an OAuth API call. I'm considering the best way to integrate this into the application's flow.
+> 
+> 
+> **Analyzing the Refresh Strategy**
+> 
+> I'm now outlining the steps the `DelegatingHandler` needs to execute. First, intercept the request and send it. Next, check the response; a `401` status necessitates token refresh. After, call the refresh token API, and on success, update the request header with the new token. Finally, re-send the request.
+> 
+> 
+> **Outlining the Implementation Steps**
+> 
+> I'm now detailing the individual steps within the `TokenRefreshHandler`. The plan is: send the initial request, evaluate the response code (specifically, a `401`), then trigger the token refresh mechanism. If successful, I'll update the request header with the new token and resend. Finally, I will return the appropriate response.
+> 
+> 
+> **Designing the Handler Structure**
+> 
+> The `TokenRefreshHandler` now taking shape. I'm focusing on its core responsibilities and dependencies. It will use an `IHttpClientFactory` to avoid circular dependencies and rely on an `ITokenService` for token management. The `SendAsync` method will orchestrate the request-response cycle, refresh, and retry.
+> 
+> 
+> **Detailing the Code Structure**
+> 
+> I'm now implementing the `TokenRefreshHandler` class. It has dependencies on `IHttpClientFactory` and `ITokenService`. The `SendAsync` method will get the token, attach it to the request, and send it. If a `401` is received, I'll use the `ITokenService` to obtain a new token and retry.
+> 
+> 
+> **Developing the Code Structure**
+> 
+> I'm deep in the implementation details. I'm focusing on the `TokenRefreshHandler` class. It has all the necessary dependencies, using the `IHttpClientFactory` and `ITokenService`. The `SendAsync` method will manage the token retrieval, setting the authentication header, sending the request, handling the `401` response with the refresh call, and re-sending the request if successful, ensuring everything operates seamlessly.
+> 
+> 
+> **Developing Refinement and Detail**
+> 
+> I'm now in the process of finalizing the structure for the `TokenRefreshHandler`. I'm starting to visualize the implementation details for the handler itself, including its necessary dependencies, such as an `IHttpClientFactory` and an `ITokenService`. I'm also now considering the need for a concurrency lock within `ITokenService` and ensuring the implementation will be thread-safe.
+> 
+> 
+> **Developing Handler Implementation**
+> 
+> I'm now focusing on writing the `TokenRefreshHandler` class. It's built with an `IHttpClientFactory` for creating HTTP clients, and `ITokenService` for handling the token refresh logic. The `SendAsync` method orchestrates the complete process: token retrieval, request modification, execution, `401` detection, refresh initiation, and retry mechanisms.
+> 
+> 
+> **Refining Implementation Strategy**
+> 
+> I'm now integrating the `TokenRefreshHandler` into my application, and the code compiles successfully. I'm focusing on the implementation of the handler. In addition, I will also test the interaction with the `ITokenService` to ensure a smooth token refresh process. I'm double-checking the code to handle edge cases and confirm that concurrency is correctly addressed.
+> 
+> 
+> **Structuring the Code Example**
+> 
+> I'm developing the `TokenRefreshHandler` and its components, and I will be paying close attention to the need for thread safety. My approach will be to incorporate a `SemaphoreSlim` in the `ITokenService` to ensure a single token refresh at a time, preventing race conditions. I'm focusing on the `SendAsync` method and its interaction with the `ITokenService`.
+> 
+> 
+絕佳的問題！這正是 `DelegatingHandler` 最經典、最強大的應用場景之一。使用 `DelegatingHandler` 來自動處理 refresh token 邏輯是 .NET 中處理 API 驗證的最佳實踐。
+
+**答案是：是的，這不僅可以用 `DelegatingHandler` 來做，而且是實現此功能的最佳方式。**
+
+這樣做的好處是，所有與 token 刷新相關的複雜邏輯都被封裝在一個地方。對於最終呼叫 API 的程式碼（例如您的 `HotelApiClient` 或 Controller），這個過程是完全透明的。它只需要正常發送請求，而不需要關心 token 是否過期。
+
+### 實現的邏輯流程
+
+這個 `DelegatingHandler` 將會像一個智慧中間人一樣工作：
+
+1.  **攔截請求**：在 `HttpClient` 發送請求之前，攔截它。
+2.  **附加 Token**：從某個地方（例如一個共享的服務）獲取當前的 access token，並將其附加到請求的 `Authorization` 標頭中。
+3.  **發送請求**：將請求傳遞給處理鏈的下一個環節（最終發送到伺服器）。
+4.  **檢查回應**：等待並接收伺服器的回應。
+5.  **判斷 Token 是否過期**：檢查回應的狀態碼。如果是 `401 Unauthorized`，就表示 token 可能已過期。
+6.  **執行刷新邏輯**：
+    *   呼叫 OAuth API 的 token endpoint，使用 refresh token 來獲取一個新的 access token 和 refresh token。
+    *   **（關鍵）處理併發**：如果有多個請求同時發現 token 過期，我們必須確保只有一個請求去執行刷新操作，其他請求則等待新 token。這通常使用 `SemaphoreSlim` 來實現。
+    *   將新的 token 安全地儲存起來。
+7.  **重試原始請求**：
+    *   使用新的 access token 更新原始請求的 `Authorization` 標頭。
+    *   重新發送原始請求。
+8.  **返回最終回應**：將第二次請求的（成功）回應返回給呼叫者。
+9.  **正常流程**：如果第一次的回應不是 `401`，則直接將該回應返回，不做任何額外操作。
+
+---
+
+### 程式碼實現步驟
+
+讓我們一步步建立一個健壯的 `TokenRefreshHandler`。
+
+#### 步驟 1：建立一個管理 Token 的服務
+
+首先，我們需要一個專門的服務來儲存和刷新 token。將這個邏輯從 `DelegatingHandler` 中分離出來，可以讓職責更清晰。
+
+```csharp
+// Token資訊的資料模型
+public class TokenResponse
+{
+    public string AccessToken { get; set; }
+    public string RefreshToken { get; set; }
+    public DateTime ExpiresAt { get; set; }
+}
+
+// 管理Token的服務介面
+public interface ITokenManager
+{
+    Task<string> GetAccessTokenAsync();
+    Task InvalidateToken(); // 當我們確定Token失效時呼叫
+}
+
+// 服務的具體實現
+// 注意：這個服務應該註冊為 Singleton，以確保整個應用程式共享同一份Token狀態。
+public class TokenManager : ITokenManager
+{
+    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly IOptions<OAuthConfig> _oauthConfig; // 假設OAuth設定在appsettings.json中
+    private TokenResponse _token;
+    private static readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);
+
+    public TokenManager(IHttpClientFactory httpClientFactory, IOptions<OAuthConfig> oauthConfig)
+    {
+        _httpClientFactory = httpClientFactory;
+        _oauthConfig = oauthConfig;
+    }
+
+    public async Task<string> GetAccessTokenAsync()
+    {
+        // 如果Token存在且尚未過期（留一些緩衝時間），直接返回
+        if (_token != null && _token.ExpiresAt > DateTime.UtcNow.AddSeconds(30))
+        {
+            return _token.AccessToken;
+        }
+
+        // 如果Token不存在或即將過期，則進入刷新邏輯
+        // 使用 SemaphoreSlim 防止多個執行緒同時刷新Token
+        await _semaphore.WaitAsync();
+        try
+        {
+            // 雙重檢查鎖：在等待期間，可能已有其他執行緒刷新了Token
+            if (_token != null && _token.ExpiresAt > DateTime.UtcNow.AddSeconds(30))
+            {
+                return _token.AccessToken;
+            }
+
+            Console.WriteLine("Token is expired or missing. Refreshing token...");
+            var client = _httpClientFactory.CreateClient("OAuthClient"); // 使用一個專門的HttpClient
+
+            var requestBody = new Dictionary<string, string>
+            {
+                ["grant_type"] = "refresh_token",
+                ["refresh_token"] = _token?.RefreshToken ?? _oauthConfig.Value.InitialRefreshToken,
+                ["client_id"] = _oauthConfig.Value.ClientId,
+                ["client_secret"] = _oauthConfig.Value.ClientSecret
+            };
+
+            var response = await client.PostAsync(_oauthConfig.Value.TokenEndpoint, new FormUrlEncodedContent(requestBody));
+
+            if (!response.IsSuccessStatusCode)
+            {
+                // 刷新失敗，拋出例外或記錄日誌，並返回舊的（可能已失效的）Token
+                throw new InvalidOperationException("Failed to refresh token.");
+            }
+
+            var responseContent = await response.Content.ReadFromJsonAsync<TokenResponse>(); // 假設API返回JSON
+            _token = new TokenResponse
+            {
+                AccessToken = responseContent.AccessToken,
+                RefreshToken = responseContent.RefreshToken, // OAuth伺服器可能會返回新的Refresh Token
+                ExpiresAt = DateTime.UtcNow.AddSeconds(3599) // 假設Token一小時後過期
+            };
+            
+            Console.WriteLine("Token refreshed successfully.");
+            return _token.AccessToken;
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    public Task InvalidateToken()
+    {
+        // 強制讓Token失效，以便下次GetAccessTokenAsync會強制刷新
+        _token = null;
+        return Task.CompletedTask;
+    }
+}
+```
+
+#### 步驟 2：建立 `TokenRefreshHandler`
+
+這個 Handler 會使用 `ITokenManager` 來處理所有邏輯。
+
+```csharp
+public class TokenRefreshHandler : DelegatingHandler
+{
+    private readonly ITokenManager _tokenManager;
+
+    public TokenRefreshHandler(ITokenManager tokenManager)
+    {
+        _tokenManager = tokenManager;
+    }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        // 1. 獲取Token並附加到標頭
+        var accessToken = await _tokenManager.GetAccessTokenAsync();
+        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+
+        // 2. 發送請求
+        var response = await base.SendAsync(request, cancellationToken);
+
+        // 3. 檢查是否為 401 Unauthorized
+        if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+        {
+            Console.WriteLine("Request returned 401. Attempting to refresh token and retry.");
+            
+            // 4. Token可能已在伺服器端失效，強制本地Token失效
+            await _tokenManager.InvalidateToken();
+            
+            // 5. 獲取新的Token（這將觸發刷新邏輯）
+            var newAccessToken = await _tokenManager.GetAccessTokenAsync();
+
+            // 6. 使用新Token更新標頭並重試請求
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", newAccessToken);
+            
+            // 再次發送同一個請求
+            return await base.SendAsync(request, cancellationToken);
+        }
+
+        // 如果不是401，直接返回回應
+        return response;
+    }
+}
+```
+
+#### 步驟 3：在 `Program.cs` 中進行設定
+
+現在，我們需要將所有東西串聯起來。
+
+```csharp
+// --- Program.cs ---
+
+// 0. 讀取設定
+builder.Services.Configure<OAuthConfig>(builder.Configuration.GetSection("OAuthConfig"));
+
+// 1. 註冊 Token 管理服務為 Singleton
+builder.Services.AddSingleton<ITokenManager, TokenManager>();
+
+// 2. 註冊 DelegatingHandler
+builder.Services.AddTransient<TokenRefreshHandler>();
+
+// 3. 註冊一個專門用於呼叫 OAuth API 的 HttpClient
+//    這個 HttpClient *不能* 包含 TokenRefreshHandler，否則會造成無限循環！
+builder.Services.AddHttpClient("OAuthClient", client =>
+{
+    // 可以在這裡設定 OAuth 伺服器的 BaseAddress
+});
+
+// 4. 註冊您的主要 HttpClient，並將 Handler 加入管線
+//    注意 Handler 的順序！刷新 Token 的 Handler 應該在最前面。
+foreach (var config in hotelConfigs)
+{
+    builder.Services.AddHttpClient(config.Name, client =>
+    {
+        client.BaseAddress = new System.Uri(config.BaseUrl);
+    })
+    // 將我們的 TokenRefreshHandler 加入處理管線
+    .AddHttpMessageHandler<TokenRefreshHandler>(); 
+    // 注意：您之前那個靜態的 AuthenticationHandler 就不再需要了，
+    // 因為 TokenRefreshHandler 已經完全接管了設定 Authorization 標頭的職責。
+}
+
+// 5. 註冊您的工廠（保持不變）
+builder.Services.AddSingleton<IHotelApiClientFactory, HotelApiClientFactory>();
+
+// ... 其他服務
+```
+
+#### `appsettings.json` 範例
+
+```json
+{
+  "OAuthConfig": {
+    "TokenEndpoint": "https://your-oauth-server.com/token",
+    "ClientId": "your_client_id",
+    "ClientSecret": "your_client_secret",
+    "InitialRefreshToken": "the_initial_refresh_token_you_got_at_login"
+  },
+  // ...
+}
+```
+
+### 最終架構總結
+
+1.  **Controller/Service**：依賴 `IHotelApiClientFactory`。
+2.  **`IHotelApiClientFactory`**：依賴 `IHttpClientFactory`，建立 `HotelApiClient`。
+3.  **`HotelApiClient`**：使用從 `IHttpClientFactory` 獲取的 `HttpClient`。
+4.  **`HttpClient` 管線**：
+    *   請求首先進入 `TokenRefreshHandler`。
+    *   `TokenRefreshHandler` 依賴 `ITokenManager` 來獲取/刷新 token。
+    *   請求帶著有效的 token 被發送出去。
+    *   如果收到 `401`，`TokenRefreshHandler` 會觸發刷新並自動重試。
+5.  **`ITokenManager`**：作為一個 `Singleton` 服務，它在整個應用程式中管理 token 的狀態，並使用一個名為 `"OAuthClient"` 的獨立 `HttpClient` 來執行刷新操作，避免了循環依賴。
+
+這個設計模式非常強大且可擴展，它將複雜的身份驗證邏輯與您的業務邏輯完全解耦，是現代 .NET 應用程式中處理 API 驗證的黃金標準。
