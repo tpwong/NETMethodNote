@@ -1,36 +1,52 @@
-SELECT
-    t.tran_id,
-    t.bucket_type,
-    t.main_id,
-    t.earning_rule_id,
-    t.gaming_dt,
-    b.bucket_name,
-    t.hub_is_synced,
-    -- 使用 CASE 表达式根据 hub_is_synced 的值来设定 priority
-    CASE
-        WHEN t.hub_is_synced = 'NotSync' THEN 1
-        WHEN t.hub_is_synced = 'Pending' THEN 2
-    END AS priority
-FROM
-    bucket_earned_transactions t
-INNER JOIN
-    earning_bucket b ON t.main_id = b.main_id AND b.is_latest
-INNER JOIN
-    earning_rule er ON er.id = t.earning_rule_id
-WHERE
-    -- 1. 这是两个查询共有的过滤条件
-    t.gaming_dt >= CURRENT_DATE - INTERVAL '14 days'
-    AND NOT t.is_void
-    -- 2. 确保只选择这两种状态的数据
-    AND t.hub_is_synced IN ('NotSync', 'Pending')
-    -- 3. 这是两个查询中不同的核心逻辑，使用 OR 连接
-    AND (
-        (t.hub_is_synced = 'NotSync' AND t.last_modified_date < current_timestamp - INTERVAL '2 hour')
-        OR
-        (t.hub_is_synced = 'Pending' AND t.last_modified_date < CURRENT_DATE - INTERVAL '6 hour')
-    )
-ORDER BY
-    priority,          -- 首先按我们设定的优先级排序
-    gaming_dt ASC,
-    tran_id DESC
-LIMIT 150;
+/// <summary>
+/// 根據 CMP 系統的交易 ID (cmpTranId) 和賭場代碼 (casinoCode) 生成對應的 Hub 系統交易 ID。
+/// 這個過程會從配置中查找一個前綴，並將其與原始 ID 拼接起來。
+/// </summary>
+/// <param name="cmpTranId">來源於 CMP 系統的交易 ID。不可為 null 或 0。</param>
+/// <param name="casinoCode">用於查找 ID 前綴的賭場代碼。不可為 null 或空。</param>
+/// <returns>
+/// 如果成功生成，則返回一個新的 Hub 交易 ID (long)。
+/// 如果輸入參數無效、找不到對應的前綴或最終生成的 ID 無法解析為長整數，則返回 null。
+/// </returns>
+private long? GetHubTranIdByCmpTranId(long? cmpTranId, string casinoCode)
+{
+    // =================================================================
+    // 步驟 1: 參數驗證 (Guard Clauses)
+    // 使用 "提前退出" 模式，讓主邏輯更清晰。
+    // =================================================================
+    if (cmpTranId is null || cmpTranId == 0 || string.IsNullOrEmpty(casinoCode))
+    {
+        // 參數無效，沒有繼續處理的意義，返回 null 表示失敗。
+        return null;
+    }
+
+    // =================================================================
+    // 步驟 2: 查找交易 ID 前綴
+    // 假設 _hubTransIdPrefix 是一個 Dictionary<string, string>
+    // =================================================================
+    if (!_hubTransIdPrefix.TryGetValue(casinoCode, out string? hubTranIdPrefix) || string.IsNullOrEmpty(hubTranIdPrefix))
+    {
+        // 如果找不到對應 casinoCode 的前綴，或前綴為空，則無法生成 ID。
+        // 返回 null 表示失敗。
+        return null;
+    }
+
+    // =================================================================
+    // 步驟 3: 組合字串並嘗試解析為 long
+    // =================================================================
+    string combinedIdString = hubTranIdPrefix + cmpTranId.Value; // .Value 是安全的，因為前面已檢查過 is null
+
+    if (long.TryParse(combinedIdString, out long hubTranId))
+    {
+        // 解析成功，返回結果。
+        return hubTranId;
+    }
+    else
+    {
+        // 如果拼接後的字串 (例如 "PREFIX12345") 不是一個有效的 long，
+        // 這可能是一個配置錯誤或數據問題。返回 null 表示失敗。
+        // 這裡也可以考慮記錄一個警告日誌。
+        // _logger.LogWarning("無法將組合後的 ID '{CombinedId}' 解析為 long。", combinedIdString);
+        return null;
+    }
+}
