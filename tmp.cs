@@ -129,3 +129,102 @@ app.Run();
 
 3.  **業務邏輯乾淨**：
     你的 Controller 或 Service 不需要知道這兩個 Client 有共享限制，也不需要寫 `Semaphore.Wait`。你只需要像平常一樣 `client.GetAsync()`，複雜的限流邏輯被封裝在底層 HTTP Pipeline 中了。
+
+
+
+
+
+
+
+
+
+
+-----
+
+
+
+
+
+
+
+
+沒錯！這是一個非常漂亮且現代（.NET 8+）的解法。
+
+使用 **Keyed Services (鍵值服務)** 可以省去建立 Wrapper 類別的麻煩，直接精準注入特定的 `SemaphoreSlim` 實體。
+
+這樣做完全符合架構原則：
+1.  **Handler** 依然是 **Transient**（確保管線安全）。
+2.  **SemaphoreSlim** 是 **Keyed Singleton**（確保全域共享同一個鎖）。
+
+以下是完整的實作方式：
+
+### 1. Program.cs 註冊
+
+你需要註冊一個帶有 Key 的 Singleton `SemaphoreSlim`，然後註冊 Handler。
+
+```csharp
+using Microsoft.Extensions.DependencyInjection;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// 1. 註冊 Keyed Singleton 的 SemaphoreSlim
+// Key: "GlobalHttpLock", 初始 3, 最大 3
+builder.Services.AddKeyedSingleton("GlobalHttpLock", (sp, key) => new SemaphoreSlim(3, 3));
+
+// 2. 註冊 Handler 為 Transient (標準做法)
+builder.Services.AddTransient<SharedConcurrencyHandler>();
+
+// 3. 設定 HttpClient 使用該 Handler
+builder.Services.AddHttpClient("MyClient")
+    .AddHttpMessageHandler<SharedConcurrencyHandler>();
+
+// 其他 Handler 也可以維持 Transient
+// builder.Services.AddTransient<OtherHandler>();
+
+var app = builder.Build();
+```
+
+### 2. SharedConcurrencyHandler 實作
+
+在建構子中使用 `[FromKeyedServices]` 屬性來注入剛才註冊的特定鎖。
+
+```csharp
+using System.Threading;
+using Microsoft.Extensions.DependencyInjection; // 必須引用這個 namespace
+
+public class SharedConcurrencyHandler : DelegatingHandler
+{
+    private readonly SemaphoreSlim _semaphore;
+
+    // 使用 [FromKeyedServices] 指定要注入哪一個 SemaphoreSlim
+    public SharedConcurrencyHandler([FromKeyedServices("GlobalHttpLock")] SemaphoreSlim semaphore)
+    {
+        _semaphore = semaphore;
+    }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        // 1. 等待進入 (使用全域共享的鎖)
+        await _semaphore.WaitAsync(cancellationToken);
+
+        try
+        {
+            // 2. 執行請求
+            return await base.SendAsync(request, cancellationToken);
+        }
+        finally
+        {
+            // 3. 釋放鎖
+            _semaphore.Release();
+        }
+    }
+}
+```
+
+### 為什麼這樣做是完美的？
+
+1.  **極簡代碼**：不需要額外的 `Limiter` 類別，直接利用 DI 容器的功能。
+2.  **執行緒安全**：`SemaphoreSlim` 本身就是 Thread-Safe 的，作為 Singleton 注入完全沒問題。
+3.  **靈活性**：如果你之後有另一組 HttpClient 需要不同的並發限制（例如限制 10），你只需要註冊另一個 Key (例如 `"HeavyLoadLock"`) 並注入即可，完全不用改 Handler 的邏輯（如果把 Key 也參數化的話）。
+
+**注意**：此功能需要 **.NET 8** 或更高版本。如果你使用的是舊版本，則需要透過 `Func<IServiceProvider, ...>` 的工廠模式手動解決注入，代碼會稍微醜一點，但原理相同。
