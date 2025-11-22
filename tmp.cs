@@ -1,202 +1,20 @@
-這是一個非常經典的架構問題：**跨客戶端共享資源限制 (Shared Resource Limiting)**。
+這是一個非常實務的問題。在 Handler 中加入 Timeout，關鍵在於**如何正確合併**「外部傳入的 Token (User Cancel)」與「內部設定的 Timeout Token」。
 
-既然你要限制的是「兩個 HttpClient 加起來」的總量，單純在各自的 Builder 設定 Policy 是不行的，因為它們會各自計算。你需要一個**共享的閘道**。
+我們需要使用 `CancellationTokenSource.CreateLinkedTokenSource` 來達成。
 
-最優雅且符合你「排隊無限久、執行限時」需求的方法，是自定義一個 **Singleton 的 DelegatingHandler**。
+以下是整合了 **Keyed Services** + **SemaphoreSlim** + **30秒 Timeout** 的完整程式碼：
 
-### 核心思路
-1.  建立一個 **Handler**，裡面放一個 `static` 或 `Singleton` 的 `SemaphoreSlim(3)`。
-2.  將這個 Handler 同時注入給 Client A 和 Client B。
-3.  在 Handler 內部實作「先排隊 (Wait)，再計時 (Timeout)」的邏輯。
-
-### 優雅的實作代碼
-
-#### 1. 建立共享的 Handler
-這個類別負責控制並發量以及執行時間的邏輯。
+### 完整實作 (SharedConcurrencyHandler.cs)
 
 ```csharp
 using System.Threading;
-
-public class SharedConcurrencyHandler : DelegatingHandler
-{
-    // 核心：這把鎖是共享的，限制總量為 3
-    private readonly SemaphoreSlim _semaphore;
-    private readonly TimeSpan _executionTimeout;
-
-    public SharedConcurrencyHandler()
-    {
-        // 限制同時只能有 3 個請求通過
-        _semaphore = new SemaphoreSlim(3, 3);
-        // 設定「真正執行」時的超時時間 (例如 10 秒)
-        _executionTimeout = TimeSpan.FromSeconds(10);
-    }
-
-    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-    {
-        // --- 階段 1: 排隊 (Waiting) ---
-        // 這裡使用傳入的 cancellationToken (通常由外層控制，或者根本不取消)
-        // 如果隊列滿了，會在這裡死等 (例如等 5 分鐘)，直到有人釋放
-        await _semaphore.WaitAsync(cancellationToken);
-
-        try
-        {
-            // --- 階段 2: 執行 (Execution) ---
-            // 拿到通行證了！現在開始倒數計時 (例如 10 秒)
-            // 我們創建一個新的 CTS，專門用於控制請求發送的時間
-            using var timeoutCts = new CancellationTokenSource(_executionTimeout);
-            
-            // 連結原本的 Token (如果外層取消，這裡也要取消)
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
-
-            try 
-            {
-                // 發送請求，使用 linkedCts 的 Token
-                return await base.SendAsync(request, linkedCts.Token);
-            }
-            catch (OperationCanceledException) when (timeoutCts.Token.IsCancellationRequested)
-            {
-                // 這裡是為了區分「排隊取消」還是「執行超時」
-                // 如果是因為 timeoutCts 觸發的取消，拋出 TimeoutException 讓上層知道是執行太久
-                throw new TimeoutException($"請求已獲取執行權，但在 {_executionTimeout.TotalSeconds} 秒內未完成。");
-            }
-        }
-        finally
-        {
-            // --- 階段 3: 釋放 (Release) ---
-            // 無論成功或失敗，都要把位置讓出來給另一個 Client
-            _semaphore.Release();
-        }
-    }
-}
-```
-
-#### 2. 在 Program.cs 中註冊
-關鍵在於將這個 Handler 註冊為 **Singleton**，並讓兩個 Client 都使用它。
-
-```csharp
-var builder = WebApplication.CreateBuilder(args);
-
-// 1. 註冊 Handler 為 Singleton (確保兩個 Client 共用同一個 Semaphore)
-builder.Services.AddSingleton<SharedConcurrencyHandler>();
-
-// 2. 設定 Client A
-builder.Services.AddHttpClient("ClientA", client =>
-{
-    client.BaseAddress = new Uri("https://api-a.com/");
-    client.Timeout = Timeout.InfiniteTimeSpan; // 廢除 Client 自帶的超時，完全交給 Handler 控制
-})
-.AddHttpMessageHandler<SharedConcurrencyHandler>(); // 加入共享閘道
-
-// 3. 設定 Client B
-builder.Services.AddHttpClient("ClientB", client =>
-{
-    client.BaseAddress = new Uri("https://api-b.com/");
-    client.Timeout = Timeout.InfiniteTimeSpan; 
-})
-.AddHttpMessageHandler<SharedConcurrencyHandler>(); // 加入同一個共享閘道
-
-var app = builder.Build();
-
-app.MapGet("/test", async (IHttpClientFactory factory) =>
-{
-    // 模擬情境：
-    // 假設 ClientA 已經佔用了 2 個名額
-    // ClientB 佔用了 1 個名額
-    // 下一個請求不管是 A 還是 B，都會在 Handler 的 WaitAsync 那裡排隊
-    
-    var clientA = factory.CreateClient("ClientA");
-    var clientB = factory.CreateClient("ClientB");
-
-    // 這裡可以隨意呼叫，底層會自動協調
-    var task1 = clientA.GetAsync("/resource");
-    var task2 = clientB.GetAsync("/resource");
-    
-    await Task.WhenAll(task1, task2);
-    return "Done";
-});
-
-app.Run();
-```
-
-### 為什麼這樣做最優雅？
-
-1.  **真正的共享狀態**：
-    因為 `SharedConcurrencyHandler` 是 Singleton，它內部的 `SemaphoreSlim` 只有一個實例。無論你是呼叫 Client A 還是 Client B，它們都在搶**同一把鎖**的 3 個位置。
-
-2.  **完美解決 Timeout 分離**：
-    *   **排隊時**：使用的是 `WaitAsync(cancellationToken)`。只要你不傳入會取消的 Token，它就會一直等（滿足你可能等 5 分鐘的需求）。
-    *   **執行時**：使用的是內部的 `timeoutCts`。一旦拿到鎖，必須在 10 秒內完成，否則拋出異常。
-
-3.  **業務邏輯乾淨**：
-    你的 Controller 或 Service 不需要知道這兩個 Client 有共享限制，也不需要寫 `Semaphore.Wait`。你只需要像平常一樣 `client.GetAsync()`，複雜的限流邏輯被封裝在底層 HTTP Pipeline 中了。
-
-
-
-
-
-
-
-
-
-
------
-
-
-
-
-
-
-
-
-沒錯！這是一個非常漂亮且現代（.NET 8+）的解法。
-
-使用 **Keyed Services (鍵值服務)** 可以省去建立 Wrapper 類別的麻煩，直接精準注入特定的 `SemaphoreSlim` 實體。
-
-這樣做完全符合架構原則：
-1.  **Handler** 依然是 **Transient**（確保管線安全）。
-2.  **SemaphoreSlim** 是 **Keyed Singleton**（確保全域共享同一個鎖）。
-
-以下是完整的實作方式：
-
-### 1. Program.cs 註冊
-
-你需要註冊一個帶有 Key 的 Singleton `SemaphoreSlim`，然後註冊 Handler。
-
-```csharp
 using Microsoft.Extensions.DependencyInjection;
 
-var builder = WebApplication.CreateBuilder(args);
-
-// 1. 註冊 Keyed Singleton 的 SemaphoreSlim
-// Key: "GlobalHttpLock", 初始 3, 最大 3
-builder.Services.AddKeyedSingleton("GlobalHttpLock", (sp, key) => new SemaphoreSlim(3, 3));
-
-// 2. 註冊 Handler 為 Transient (標準做法)
-builder.Services.AddTransient<SharedConcurrencyHandler>();
-
-// 3. 設定 HttpClient 使用該 Handler
-builder.Services.AddHttpClient("MyClient")
-    .AddHttpMessageHandler<SharedConcurrencyHandler>();
-
-// 其他 Handler 也可以維持 Transient
-// builder.Services.AddTransient<OtherHandler>();
-
-var app = builder.Build();
-```
-
-### 2. SharedConcurrencyHandler 實作
-
-在建構子中使用 `[FromKeyedServices]` 屬性來注入剛才註冊的特定鎖。
-
-```csharp
-using System.Threading;
-using Microsoft.Extensions.DependencyInjection; // 必須引用這個 namespace
-
 public class SharedConcurrencyHandler : DelegatingHandler
 {
     private readonly SemaphoreSlim _semaphore;
 
-    // 使用 [FromKeyedServices] 指定要注入哪一個 SemaphoreSlim
+    // 注入 Keyed Semaphore
     public SharedConcurrencyHandler([FromKeyedServices("GlobalHttpLock")] SemaphoreSlim semaphore)
     {
         _semaphore = semaphore;
@@ -204,27 +22,71 @@ public class SharedConcurrencyHandler : DelegatingHandler
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
-        // 1. 等待進入 (使用全域共享的鎖)
-        await _semaphore.WaitAsync(cancellationToken);
+        // 1. 設定 30 秒 Timeout 的 CTS
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        // 2. 將「外部傳入的 Token」與「Timeout Token」合併
+        // 這樣無論是使用者按取消，還是時間到了，都會觸發取消
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
 
         try
         {
-            // 2. 執行請求
-            return await base.SendAsync(request, cancellationToken);
+            // 3. 等待鎖 (使用 linkedToken)
+            // 如果排隊超過 30 秒還沒拿到鎖，這裡就會拋出 OperationCanceledException
+            await _semaphore.WaitAsync(linkedCts.Token);
+
+            try
+            {
+                // 4. 執行請求 (使用 linkedToken)
+                // 如果請求執行太久導致總時間超過 30 秒，這裡也會拋出異常
+                return await base.SendAsync(request, linkedCts.Token);
+            }
+            finally
+            {
+                // 5. 絕對要釋放鎖
+                _semaphore.Release();
+            }
         }
-        finally
+        catch (OperationCanceledException)
         {
-            // 3. 釋放鎖
-            _semaphore.Release();
+            // 這裡可以判斷是 Timeout 還是 User Cancel
+            if (timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+            {
+                // 這是因為 30秒 Timeout 造成的
+                throw new TimeoutException("Request timed out after 30 seconds (Wait + Execution).");
+            }
+            
+            // 否則就是使用者自己取消的，直接往上拋
+            throw;
         }
     }
 }
 ```
 
-### 為什麼這樣做是完美的？
+### 重點邏輯解釋
 
-1.  **極簡代碼**：不需要額外的 `Limiter` 類別，直接利用 DI 容器的功能。
-2.  **執行緒安全**：`SemaphoreSlim` 本身就是 Thread-Safe 的，作為 Singleton 注入完全沒問題。
-3.  **靈活性**：如果你之後有另一組 HttpClient 需要不同的並發限制（例如限制 10），你只需要註冊另一個 Key (例如 `"HeavyLoadLock"`) 並注入即可，完全不用改 Handler 的邏輯（如果把 Key 也參數化的話）。
+1.  **`CreateLinkedTokenSource` (關鍵)**：
+    *   你不能只用 `timeoutCts.Token`，因為如果使用者在第 2 秒就按了「取消」，程式必須馬上停止，不能傻傻等到 30 秒。
+    *   `LinkedToken` 確保了 **(使用者取消 OR 時間到)** 只要發生其中一個，操作就會中斷。
 
-**注意**：此功能需要 **.NET 8** 或更高版本。如果你使用的是舊版本，則需要透過 `Func<IServiceProvider, ...>` 的工廠模式手動解決注入，代碼會稍微醜一點，但原理相同。
+2.  **Scope (範圍)**：
+    *   這個 Timeout 包含了 **「排隊等待鎖的時間」 + 「實際 HTTP 請求的時間」**。
+    *   如果 Semaphore 很滿，光是排隊就排了 30 秒，程式會直接拋出 Exception 放棄，不會發送請求。
+
+3.  **`using` 語句**：
+    *   `CancellationTokenSource` 是需要 Dispose 的資源，務必使用 `using` 確保記憶體釋放。
+
+4.  **Exception 處理**：
+    *   標準的 `HttpClient` 在 Timeout 時通常會拋出 `TaskCanceledException` (它是 `OperationCanceledException` 的子類)。
+    *   我在 `catch` 區塊加了一段邏輯，讓你區分「是真的 Timeout」還是「使用者取消」，方便你做 Log 或錯誤處理。
+
+### Program.cs (保持不變)
+
+註冊部分完全不需要改動，依然維持簡潔：
+
+```csharp
+builder.Services.AddKeyedSingleton("GlobalHttpLock", (sp, key) => new SemaphoreSlim(3, 3));
+builder.Services.AddTransient<SharedConcurrencyHandler>();
+builder.Services.AddHttpClient("MyClient")
+    .AddHttpMessageHandler<SharedConcurrencyHandler>();
+```
