@@ -245,3 +245,140 @@ public async Task CheckHealth()
 2.  **Handler** 攔截請求：「看 URL 是否命中關鍵字」。
 3.  **命中** -> 讀取 JSON 找 RequestId -> 計時 -> Log。
 4.  **未命中** -> 直接發送，無效能損耗。
+
+
+
+
+
+
+
+
+---
+
+
+
+
+
+面對 URL 中包含動態參數（如 `{playerId}` 數字或 ID）的情況，單純使用 `string.Contains` 是無法運作的，因為實際的 URL（例如 `players/123/...`）並不包含字面上的 `{playerId}` 字串。
+
+這裡有三種解決方案，按**推薦程度**排序：
+
+### 方法一：引入正則表達式 (Regex) —— 最推薦、最穩健
+
+這是處理動態 URL 的標準做法。你可以將配置分為「普通關鍵字」和「正則表達式模式」。
+
+**1. 修改 `LogOptions` 類別**
+增加一個 `TrackedUrlPatterns` 來存放正則表達式。
+
+```csharp
+using System.Text.RegularExpressions;
+
+public static class LogOptions
+{
+    // 1. 普通的靜態關鍵字 (保持原本的邏輯)
+    public static readonly HashSet<string> TrackedUrlKeywords =
+    [
+        "players/start-table-rating",
+        "players/update-table-rating",
+        "players/record-table-rating"
+    ];
+
+    // 2. 新增：動態 URL 的正則表達式
+    // [^/]+ 代表 "除了斜線以外的任意字元"，這可以匹配數字、GUID 等 ID
+    public static readonly List<Regex> TrackedUrlPatterns =
+    [
+        // 對應: players/{playerId}/table-rating/{ratingId}/void
+        new Regex(@"players/[^/]+/table-rating/[^/]+/void", RegexOptions.IgnoreCase | RegexOptions.Compiled)
+    ];
+}
+```
+
+**2. 修改 `RequestIdTimingHandler` 的判斷邏輯**
+同時檢查關鍵字和正則表達式。
+
+```csharp
+// ... 前面的代碼 ...
+
+string requestUrl = request.RequestUri?.ToString() ?? string.Empty;
+
+// 檢查 A: 是否包含靜態關鍵字 (原本的邏輯)
+bool isTracked = LogOptions.TrackedUrlKeywords.Any(keyword => 
+    requestUrl.Contains(keyword, StringComparison.CurrentCultureIgnoreCase));
+
+// 檢查 B: 如果還沒匹配到，檢查是否符合正則表達式 (新增的邏輯)
+if (!isTracked)
+{
+    isTracked = LogOptions.TrackedUrlPatterns.Any(pattern => pattern.IsMatch(requestUrl));
+}
+
+// ... 後面的代碼 ...
+```
+
+---
+
+### 方法二：自動將 `{...}` 轉換為通配符 (進階技巧)
+
+如果你希望保持 `LogOptions` 裡面的寫法乾淨（只寫字串），不想手寫 Regex，你可以寫一個輔助方法，自動把設定檔裡的 `{xyz}` 視為通配符。
+
+**修改判斷邏輯：**
+
+```csharp
+// 在 Handler 裡面直接改寫判斷邏輯
+bool isTracked = LogOptions.TrackedUrlKeywords.Any(keyword => 
+{
+    // 如果關鍵字裡有 '{'，我們就把它當作樣板處理
+    if (keyword.Contains("{"))
+    {
+        // 把 "{playerId}" 這種佔位符替換成 Regex 的 "[^/]+" (匹配任意路徑段)
+        // 並 Escape 掉其他特殊字符
+        string pattern = "^.*" + System.Text.RegularExpressions.Regex.Escape(keyword)
+                            .Replace(@"\{", "[^/]+") // 處理轉義後的 {
+                            .Replace(@"\}", "")      // 處理轉義後的 }
+                            + ".*$";
+                            
+        // 這裡的 Replace 邏輯視你的具體需求而定，簡單版如下：
+        // 將原始字串的 {xxx} 換成正則表達式 .* 或者 [^/]+
+        // 為了效能，建議在 LogOptions 初始化時就編譯好 Regex，不要在每次請求時做 Replace
+        
+        // 簡單實作概念：
+        var regexPattern = keyword.Replace("{playerId}", "[^/]+")
+                                  .Replace("{ratingId}", "[^/]+");
+        return System.Text.RegularExpressions.Regex.IsMatch(requestUrl, regexPattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    }
+
+    // 普通字串比對
+    return requestUrl.Contains(keyword, StringComparison.CurrentCultureIgnoreCase);
+});
+```
+*注意：方法二如果在每次 Request 都做 `Regex` 的字串替換與編譯，效能會很差。建議採用方法一，預先編譯好 `Regex`。*
+
+---
+
+### 方法三：簡化關鍵字 (最快速但不嚴謹)
+
+如果你的 URL 結構很獨特，你可以只比對**不變的部分**。
+
+原本的 URL：`players/{playerId}/table-rating/{ratingId}/void`
+
+你可以觀察到 `/void` 結尾且包含 `table-rating` 是這個 API 的特徵。你可以將關鍵字改為只檢查特徵片段。
+
+**修改 `LogOptions`：**
+```csharp
+public static readonly HashSet<string> TrackedUrlKeywords =
+[
+    "players/start-table-rating",
+    // ...
+    "/void" // 風險：可能會誤判其他結尾是 /void 的 API
+];
+```
+
+或者在 Handler 裡寫死特殊邏輯（不推薦，維護性差）：
+```csharp
+bool isTracked = LogOptions.TrackedUrlKeywords.Any(...) 
+                 || (requestUrl.Contains("table-rating") && requestUrl.EndsWith("/void"));
+```
+
+### 總結建議
+
+請使用 **方法一 (Regex)**。它最清晰，效能最好（因為 Regex 是預先編譯的），而且能精確匹配像 `players/123/table-rating/456/void` 這樣的路徑，不會誤判。
+
