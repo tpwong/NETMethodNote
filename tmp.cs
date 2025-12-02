@@ -2,11 +2,7 @@ UPDATE earning_qualified_ratings t
 SET acct      = @newAcct,
     player_id = @newPlayerId,
     updated_at = CURRENT_TIMESTAMP
-WHERE t.acct        = @oldAcct
-  AND t.gaming_dt   = @gamingDt
-  AND t.casino_code = @casinoCode
-  AND t.dept_code   = @deptCode
-  AND t.tran_id     = @tranId
+WHERE t.acct = @oldAcct
   AND NOT EXISTS (
       SELECT 1
       FROM earning_qualified_ratings x
