@@ -1,68 +1,186 @@
-private async Task<IOrderedEnumerable<BucketBalance>> GetAvailableBucketBalance(
-    string acct, string bucketType, string category, DateOnly gamingDt)
+下面示範在 C# + Dapper 下，如何對 PostgreSQL 的 `40001`（serialization_failure）做**自動重試 + 回滾**。你可以直接套到專案裡。
+
+假設你用的是 `Npgsql` + Dapper。
+
+---
+
+## 1. 建一個通用的「帶重試的交易執行」方法
+
+```csharp
+using System;
+using System.Data;
+using System.Threading.Tasks;
+using Dapper;
+using Npgsql;
+
+public static class PgSerializableHelper
 {
-    // -----------------------------------------------------------------
-    // 定義區域函式：負責從 DB 撈取並過濾資料 (避免重複寫兩次邏輯)
-    // -----------------------------------------------------------------
-    async Task<IOrderedEnumerable<BucketBalance>> FetchAndFilterAsync()
+    /// <summary>
+    /// 在 SERIALIZABLE 隔離級別下執行一段交易邏輯，遇到 40001 會自動重試。
+    /// </summary>
+    public static async Task ExecuteSerializableAsync(
+        string connectionString,
+        Func<IDbConnection, IDbTransaction, Task> work,
+        int maxRetries = 3,
+        int baseDelayMs = 50)
     {
-        var balances = await bucketEarningDb.PlayerBucketTotal(acct, gamingDt);
+        if (maxRetries < 1) maxRetries = 1;
 
-        // 根據 Category 過濾
-        if (string.Equals(category, "Base", StringComparison.OrdinalIgnoreCase))
+        for (int attempt = 1; attempt <= maxRetries; attempt++)
         {
-            balances = balances.Where(c => c.ExpiryDate is null);
+            await using var conn = new NpgsqlConnection(connectionString);
+            await conn.OpenAsync();
+
+            // 明確設定隔離級別為 SERIALIZABLE
+            await using var tx = await conn.BeginTransactionAsync(
+                IsolationLevel.Serializable
+            );
+
+            try
+            {
+                await work(conn, tx);
+
+                await tx.CommitAsync();
+                return; // 成功就結束
+            }
+            catch (PostgresException ex) when (ex.SqlState == "40001")
+            {
+                // 序列化衝突：回滾並準備重試
+                try { await tx.RollbackAsync(); } catch { /* ignore */ }
+
+                if (attempt == maxRetries)
+                    throw; // 已達最大重試次數，往外拋
+
+                // 簡單的退避(backoff)避免又同時撞在一起
+                var delay = baseDelayMs * attempt;
+                await Task.Delay(delay);
+            }
+            catch
+            {
+                // 其他錯誤：回滾後直接拋出
+                try { await tx.RollbackAsync(); } catch { /* ignore */ }
+                throw;
+            }
         }
-        else if (string.Equals(category, "Promotional", StringComparison.OrdinalIgnoreCase))
+    }
+
+    /// <summary>
+    /// 有回傳值的版本。
+    /// </summary>
+    public static async Task<TResult> ExecuteSerializableAsync<TResult>(
+        string connectionString,
+        Func<IDbConnection, IDbTransaction, Task<TResult>> work,
+        int maxRetries = 3,
+        int baseDelayMs = 50)
+    {
+        if (maxRetries < 1) maxRetries = 1;
+
+        for (int attempt = 1; attempt <= maxRetries; attempt++)
         {
-            balances = balances.Where(c => c.ExpiryDate is not null);
+            await using var conn = new NpgsqlConnection(connectionString);
+            await conn.OpenAsync();
+
+            await using var tx = await conn.BeginTransactionAsync(
+                IsolationLevel.Serializable
+            );
+
+            try
+            {
+                var result = await work(conn, tx);
+                await tx.CommitAsync();
+                return result;
+            }
+            catch (PostgresException ex) when (ex.SqlState == "40001")
+            {
+                try { await tx.RollbackAsync(); } catch { /* ignore */ }
+
+                if (attempt == maxRetries)
+                    throw;
+
+                var delay = baseDelayMs * attempt;
+                await Task.Delay(delay);
+            }
+            catch
+            {
+                try { await tx.RollbackAsync(); } catch { /* ignore */ }
+                throw;
+            }
         }
 
-        // 排序與篩選 BucketType
-        return balances
-            .Where(x => x.BucketType == bucketType)
-            .OrderBy(x => x.ExpiryDate ?? DateOnly.MaxValue)
-            .ThenByDescending(x => x.Total);
+        throw new InvalidOperationException("Unreachable");
     }
-
-    // =================================================================
-    // 步驟 1: 第一次嘗試獲取 (First Attempt)
-    // =================================================================
-    var availables = await FetchAndFilterAsync();
-
-    if (!availables.IsNullOrEmpty())
-    {
-        return availables; // 如果有資料，直接回傳
-    }
-
-    // =================================================================
-    // 步驟 2: 沒資料，準備建立初始資料 (Create Initial)
-    // =================================================================
-    var initialBalance = new BucketBalance
-    {
-        Acct = acct,
-        BucketName = GetDefaultBucketName(bucketType, category),
-        BucketType = bucketType,
-        ExpiryDate = await GetBucketExpiryDate(bucketType, category),
-        Total = 0m
-    };
-
-    // 寫入資料庫
-    await bucketEarningDb.InitialBucket(initialBalance);
-
-    // =================================================================
-    // 步驟 3: 建立後，再查一次 (Second Attempt / Retry)
-    // =================================================================
-    availables = await FetchAndFilterAsync();
-
-    if (!availables.IsNullOrEmpty())
-    {
-        return availables; // 如果這次查到了 (DB寫入成功且讀取成功)，回傳 DB 的資料
-    }
-
-    // =================================================================
-    // 步驟 4: 還是查不到 (可能是 DB 延遲或寫入問題)，直接回傳剛剛建立的物件
-    // =================================================================
-    // 將單一物件包裝成 IOrderedEnumerable 回傳
-    return new[] { initialBalance }.OrderBy(x => x.ExpiryDate);
 }
+```
+
+---
+
+## 2. 在你的業務程式碼中使用
+
+### 無回傳值例子
+
+```csharp
+public async Task AdjustBucketBalanceAsync(string connStr, int bucketId, decimal delta)
+{
+    await PgSerializableHelper.ExecuteSerializableAsync(
+        connStr,
+        async (conn, tx) =>
+        {
+            // 用 Dapper 查詢 / 更新
+            var balance = await conn.QuerySingleAsync<decimal>(
+                "SELECT balance FROM bucket_balances WHERE bucket_id = @id FOR UPDATE",
+                new { id = bucketId },
+                transaction: tx);
+
+            var newBalance = balance + delta;
+            if (newBalance < 0)
+                throw new InvalidOperationException("餘額不足");
+
+            await conn.ExecuteAsync(
+                "UPDATE bucket_balances SET balance = @bal WHERE bucket_id = @id",
+                new { bal = newBalance, id = bucketId },
+                transaction: tx);
+        },
+        maxRetries: 3 // 可調
+    );
+}
+```
+
+### 有回傳值例子
+
+```csharp
+public async Task<decimal> AdjustAndReturnBalanceAsync(string connStr, int bucketId, decimal delta)
+{
+    return await PgSerializableHelper.ExecuteSerializableAsync(
+        connStr,
+        async (conn, tx) =>
+        {
+            var balance = await conn.QuerySingleAsync<decimal>(
+                "SELECT balance FROM bucket_balances WHERE bucket_id = @id FOR UPDATE",
+                new { id = bucketId },
+                transaction: tx);
+
+            var newBalance = balance + delta;
+            if (newBalance < 0)
+                throw new InvalidOperationException("餘額不足");
+
+            await conn.ExecuteAsync(
+                "UPDATE bucket_balances SET balance = @bal WHERE bucket_id = @id",
+                new { bal = newBalance, id = bucketId },
+                transaction: tx);
+
+            return newBalance;
+        }
+    );
+}
+```
+
+---
+
+## 3. 要點整理
+
+1. **隔離級別**：`BeginTransaction(IsolationLevel.Serializable)` 必須指定；否則只是預設 `Read Committed`。
+2. **只捕捉 40001**：`PostgresException.SqlState == "40001"`；其他錯誤要直接拋出。
+3. **一定要 rollback**：一旦例外發生，先 `RollbackAsync()`，再決定是否重試或向上拋。
+4. **退避策略**：簡單 `Task.Delay(baseDelayMs * attempt)` 就能大幅降低同時又撞在一起的機率。
+
+如果你貼出目前 Dapper 交易的實作，我可以幫你直接改成帶 40001 重試版。
