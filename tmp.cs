@@ -1,48 +1,66 @@
-BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED;
+@startuml
+title GSI Known Rating Flow (Timeline View)
+scale 100 as 50 pixels
 
--- 先鎖住會被這次交易影響到的 bucket_balances
-WITH summary AS (
-    SELECT acct, t.bucket_name, t.bucket_type, expiry_date, SUM(earned) total
-    FROM bucket_earned_transactions t
-    JOIN earning_bucket e ON t.main_id = e.main_id AND e.is_latest
-    WHERE tran_id = 50981524541
-    GROUP BY acct, t.bucket_name, t.bucket_type, expiry_date
-)
-SELECT 1
-FROM bucket_balances b
-JOIN summary s
-  ON  b.acct        = s.acct
-  AND b.bucket_name = s.bucket_name
-  AND b.bucket_type = s.bucket_type
-  AND (
-        (b.expiry_date IS NULL AND s.expiry_date IS NULL)
-     OR (b.expiry_date = s.expiry_date)
-      )
-FOR UPDATE;
+' Define the participants on the Y-axis
+robust "Player" as P
+robust "WDTS" as W
+robust "GSI" as G
 
--- 再用同樣邏輯跑 MERGE（這是第二條語句，要再宣告一次 CTE）
-WITH summary AS (
-    SELECT acct, t.bucket_name, t.bucket_type, expiry_date, SUM(earned) total
-    FROM bucket_earned_transactions t
-    JOIN earning_bucket e ON t.main_id = e.main_id AND e.is_latest
-    WHERE tran_id = 50981524541
-    GROUP BY acct, t.bucket_name, t.bucket_type, expiry_date
-)
-MERGE INTO bucket_balances b
-USING summary t
-  ON  b.acct        = t.acct
-  AND b.bucket_type = t.bucket_type
-  AND (
-        (b.expiry_date IS NULL AND t.expiry_date IS NULL)
-     OR (b.expiry_date = t.expiry_date)
-      )
-  AND b.bucket_name = t.bucket_name
-WHEN MATCHED THEN
-  UPDATE SET total = b.total - t.total,
-             last_modified_date = CURRENT_TIMESTAMP
-WHEN NOT MATCHED THEN
-  INSERT (acct, bucket_name, bucket_type, expiry_date, total)
-  VALUES (t.acct, t.bucket_name, t.bucket_type, t.expiry_date, -t.total)
-RETURNING clock_timestamp() AS ts, ...;
+' Define the flow over time (X-axis)
+@0
+P is Idle
+W is Idle
+G is Idle
 
-COMMIT;
+' == Anonymous Ratings ==
+@10
+P is "Seated (Anonymous)"
+P -> W : Play rating #1 (anon)
+@20
+P -> W : Play rating #2 (anon)
+@30
+P -> W : Play rating #3 (anon)
+W is "Storing Anon Ratings"
+
+' Note for the anonymous phase
+highlight 10 to 40 #LightBlue;line:DimGrey : Anonymous Phase
+
+' == Player Clock-in ==
+@40
+P is "Clocking In"
+P -> W : Give player-card (clock-in)
+W is "Processing Clock-in"
+
+@50
+W -> G : Send empty open rating #1 (sessionId: 123)
+G is "Session Open"
+
+@60
+W -> G : Send update rating #1 (sessionId: 123)
+
+@70
+W -> G : Send update rating #2 (sessionId: 123)
+
+@80
+W -> G : Send update rating #3 (sessionId: 123)
+
+' == Known Play ==
+@90
+P is "Playing (Known)"
+P -> W : Play rating #4 (sessionId: 123)
+W -> G : Send update rating #4
+
+@100
+P -> W : Play rating #5 (sessionId: 123)
+W -> G : Send update rating #5
+
+' == Player Clock-out ==
+@110
+P is "Clocking Out"
+W -> G : Send close rating (sessionId: 123)
+G is Idle
+W is Idle
+P is Idle
+
+@enduml
